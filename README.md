@@ -183,7 +183,7 @@ python -m agent.eval \
 最终提交文件命名格式：
 
 ```text
-学号-姓名-submission.jsonl
+学号-姓名-submission-最终得分.jsonl
 ```
 
 ### 9.2 单题结果格式
