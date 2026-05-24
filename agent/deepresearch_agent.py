@@ -38,6 +38,7 @@ class AgentMemory:
         self.pending_notes: List[str] = []
         self.evidence: List[Dict] = []
         self.fetched_docids: Dict[str, int] = {}
+        self.last_assess: str = ""  # for Synthesizer context
 
     def add_facts(self, facts: List[str]):
         for f in facts:
@@ -188,13 +189,16 @@ PLANNER_PROMPT = """## Query Decomposition
 Break the question below into 3-5 distinct search directions.
 
 RULES:
-- Each direction = 3-5 English keywords (NOT sentences, NOT questions)
-- Cover different angles: different entities, time periods, events, concepts
-- Use concrete, distinctive words that would appear VERBATIM in documents
+- Each direction = 3-6 English KEYWORDS only (NOT a sentence, NOT a question)
+- NO parentheses (), NO commas, NO punctuation — just space-separated words
+- Cover different angles: entities, time periods, events, concepts
+- Use concrete, distinctive words that appear VERBATIM in documents
 - BM25 does pure keyword matching — rare distinctive words dominate
 
+BAD (too descriptive): "Magazine name (weekly, 1800s, $100 million)"
+GOOD (pure keywords): "weekly magazine 1800s 100 million dollars"
 
-Output one direction per line with "- " prefix. 3-5 keywords each."""
+Output one direction per line with "- " prefix, 3-6 keywords each."""
 
 SCREEN_PROMPT = """## Document Screening
 
@@ -294,9 +298,14 @@ def _parse_queries(text: str) -> List[str]:
         s = line.strip()
         if s.startswith('-'):
             q = s[1:].strip().strip('"\'')
+            q = q.replace('**', '').replace('*', '').strip()
             words = q.split()
-            if 2 <= len(words) <= 10:
-                queries.append(q)
+            # Reject queries with too many words (>10) or containing parentheses
+            if not (2 <= len(words) <= 10):
+                continue
+            if '(' in q or ')' in q:
+                continue
+            queries.append(q)
     return queries[:5]
 
 
@@ -560,6 +569,9 @@ def agent_rethink(client, model, question: str,
 def agent_synthesize(client, model, question: str,
                      memory: AgentMemory) -> str:
     ctx = _build_context(question, memory)
+    # Include Assessor's constraint audit so Synthesizer knows what's satisfied
+    if memory.last_assess:
+        ctx += f"\n\n## Assessor's Final Audit\n{memory.last_assess[:2000]}"
     prompt = f"{ctx}\n\n{SYNTHESIZER_PROMPT}"
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
@@ -710,6 +722,10 @@ def run_agent_loop(
         rec["screen"] = screen_raw
         docids = _parse_docids(screen_raw, results)
 
+        # Fallback: if Screen produced no docids, blindly take top-2 by score
+        if not docids and results:
+            docids = [r["docid"] for r in results[:2]]
+
         # ── Fetch (QueryAwareChunker + dead-loop guard) ──
         docs = agent_fetch(registry, docids, memory) if docids else []
         rec["fetched"] = docs
@@ -742,6 +758,7 @@ def run_agent_loop(
         assess_raw = agent_assess(client, model, query, memory, current_query)
         assess_raw = _strip_think(assess_raw)
         rec["assess"] = assess_raw
+        memory.last_assess = assess_raw  # for Synthesizer
 
         round_records.append(rec)
         status = _parse_status(assess_raw)
