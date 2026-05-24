@@ -218,11 +218,11 @@ EXECUTOR_PROMPT = """## Fact Extraction
 Given the question and the full document texts above, classify your findings:
 
 ### Facts Found
-List ONLY facts that match MULTIPLE constraints from the question — not just a single keyword.
-- A name alone is NOT a fact unless the document also connects it to other question details (dates, places, relationships).
-- If a document mentions a "librarian" but says nothing about Dakota, biography, or Europe visit — it is NOT a fact worth saving.
-- Each fact must cite concrete details (names, dates, titles, events) confirmed by the document AND relevant to the specific constraints.
-- If nothing matches multiple constraints, write "None."
+Specific, verifiable facts FROM the documents that are RELATED to the question.
+- Each fact must cite concrete details (names, dates, titles, events) that appear in the document AND connect to the question's constraints.
+- It is OK if a single fact only addresses some constraints — we accumulate evidence across rounds.
+- Be honest: if a document contains a name but no other connection to the question, note it but explain the gap.
+- If nothing relevant, write "None."
 
 ### Dead Ends
 Candidates found in the documents that are CONFIRMED NOT to match one or more question constraints. Only list if there is POSITIVE evidence a candidate is wrong (e.g., "Book X was published in 1935" when question requires 1920s). "Not mentioned" is NOT a dead end. If none, write "None."
@@ -230,6 +230,7 @@ Candidates found in the documents that are CONFIRMED NOT to match one or more qu
 Output:
 Facts Found:
 - fact 1
+- fact 2
 
 Dead Ends:
 - candidate: why it violates which constraint"""
@@ -269,10 +270,11 @@ SYNTHESIZER_PROMPT = """## Final Answer
 
 All search rounds are complete. Based on all confirmed facts gathered through research, answer the question precisely.
 
-CRITICAL RULES:
-- Only use the facts listed above as evidence. DO NOT guess or hallucinate names.
-- If ANY constraint from the question still has "no evidence", say: Unable to determine from available evidence.
-- Only give a name/answer if ALL constraints are satisfied by confirmed facts.
+RULES:
+- Base your answer only on the confirmed facts and evidence above.
+- If the evidence clearly supports a specific answer, state it confidently.
+- If evidence is insufficient or contradictory, say: Unable to determine from available evidence.
+- DO NOT fabricate names or details that do not appear in the facts.
 
 Output:
 Exact Answer: <the precise answer, or "Unable to determine from available evidence.">"""
