@@ -301,7 +301,7 @@ def main():
     parser.add_argument("--api-key", default="dummy", help="API key")
     parser.add_argument("--output", default=None, help="评估结果输出路径")
     parser.add_argument("--temperature", type=float, default=0.0, help="评估模型 temperature")
-    parser.add_argument("--max-tokens", type=int, default=256, help="评估模型 max_tokens")
+    parser.add_argument("--max-tokens", type=int, default=4096, help="评估模型 max_tokens")
     args = parser.parse_args()
 
     if args.output is None:

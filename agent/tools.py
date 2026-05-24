@@ -85,36 +85,6 @@ def get_agent_tool_specs_and_registry(
         if doc is None:
             return {"docid": docid, "error": "document not found"}
         return doc
-        
-    def find_in_doc(docid: str, keyword: str) -> Dict[str, Any]:
-        """Fetch the document and find occurrences of the keyword."""
-        doc = searcher.get_document(docid)
-        if doc is None:
-            return {"docid": docid, "error": "document not found"}
-        text = doc.get("text", "")
-        if not text:
-            return {"docid": docid, "error": "document is empty"}
-            
-        import re
-        # Find all occurrences with some context string
-        context_window = 100
-        matches = [m.start() for m in re.finditer(re.escape(keyword), text, re.IGNORECASE)]
-        
-        if not matches:
-            return {"docid": docid, "keyword": keyword, "message": "keyword not found in document"}
-            
-        snippets = []
-        for idx in matches[:5]: # limit to first 5 matches to avoid giant returns
-            start = max(0, idx - context_window)
-            end = min(len(text), idx + len(keyword) + context_window)
-            snippets.append(text[start:end].replace('\n', ' '))
-            
-        return {
-            "docid": docid,
-            "keyword": keyword,
-            "match_count": len(matches),
-            "snippets": snippets
-        }
 
     tools = [
         {
@@ -148,20 +118,5 @@ def get_agent_tool_specs_and_registry(
                 },
             },
         },
-        {
-            "type": "function",
-            "function": {
-                "name": "find_in_doc",
-                "description": "Find a specific keyword within a document and return surrounding context.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "docid": {"type": "string", "description": "Document id"},
-                        "keyword": {"type": "string", "description": "The exact phrase or keyword to search for in this document"}
-                    },
-                    "required": ["docid", "keyword"],
-                },
-            },
-        },
     ]
-    return tools, {"search": search, "get_document": get_document, "find_in_doc": find_in_doc}
+    return tools, {"search": search, "get_document": get_document, "_searcher": searcher}

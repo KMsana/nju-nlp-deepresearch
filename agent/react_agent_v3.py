@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Deep Research Agent — 5-step pipeline per round with structured memory.
+v3: adds pre-search question decomposition into multiple keyword angles.
 
 Pipeline per round:
   Step A: code-forced search(query)
@@ -10,6 +11,7 @@ Pipeline per round:
   Step E: model audits constraints → NEED_MORE / READY_TO_ANSWER
 
 Round 1 uses the full question as the search query.
+When stuck, cycles through pre-decomposed keyword angles before rethink.
 Structured memory (facts, searched queries, ruled-out) maintained across rounds.
 """
 
@@ -80,6 +82,31 @@ SYSTEM_PROMPT = (
     "structured memory of confirmed facts across rounds."
 )
 
+# ── v3 NEW: Question decomposition prompt ─────────────────────────
+DECOMPOSE_PROMPT = """## Query Decomposition
+
+Break the question below into 3-5 distinct search directions.
+
+RULES:
+- Each direction = 3-5 English keywords (NOT sentences, NOT questions)
+- Cover different angles: different entities, time periods, events, concepts
+- Use concrete, distinctive words that would appear VERBATIM in documents
+- BM25 does pure keyword matching — rare distinctive words dominate
+
+Example:
+Question: A book published in the 1920s about Australian inland discoveries,
+         by an author who married in the 1890s and wrote another book 1900-1910,
+         with a barrel-shaped floating vessel on pages 332-339
+
+Output:
+- 1920s Australian inland exploration book
+- author married 1890s publisher Methuen
+- barrel-shaped floating vessel description
+- botanist Allan Cunningham spear attack
+- early Australian colonization 1906 book
+
+Output one direction per line with "- " prefix. 3-5 keywords each."""
+
 DOC_SCREEN_PROMPT = """## Document Screening
 
 Review the search results above. Decide which documents are worth reading in full.
@@ -118,7 +145,7 @@ RULES:
 
 BM25 does pure keyword matching — no semantics, no synonyms. Only exact word overlap counts. Rare distinctive words dominate.
 
-For NEED_MORE: pick 3-6 most DISTINCTIVE keywords that would appear VERBATIM in the target document.
+For NEED_MORE: pick 3-5 most DISTINCTIVE keywords that would appear VERBATIM in the target document.
 
 Output:
 Constraint Audit:
@@ -127,7 +154,7 @@ Constraint Audit:
 Status: NEED_MORE | READY_TO_ANSWER
 
 -- If NEED_MORE:
-Search Query: <keyword-query>"""
+Search Query: <3-5 keywords>"""
 
 FINAL_ANSWER_PROMPT = """## Final Answer
 
@@ -143,7 +170,7 @@ You have been searching without results for multiple rounds. Look at the questio
 
 Output:
 New Direction: <what to pursue and why>
-Search Query: <keyword-query>"""
+Search Query: <3-5 keywords>"""
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -160,8 +187,33 @@ def _chat(client: Any, model: str, messages: List[Dict[str, Any]],
 
 def _strip_think(text: str) -> str:
     cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
-    cleaned = re.sub(r'<think>.*', '', cleaned, flags=re.DOTALL).strip()
-    return cleaned if cleaned else text.strip()
+    cleaned = re.sub(r'<think>.*$', '', cleaned, flags=re.DOTALL).strip()
+    return cleaned  # don't fall back to raw <think> text
+
+
+# ── v3 NEW: Parse decomposition output ─────────────────────────────
+def _parse_decompose_queries(text: str) -> List[str]:
+    """Parse '- keyword1 keyword2 ...' lines from decomposition output."""
+    queries = []
+    for line in text.split('\n'):
+        s = line.strip()
+        if s.startswith('-'):
+            q = s[1:].strip().strip('"\'')
+            words = q.split()
+            if 2 <= len(words) <= 10:
+                queries.append(q)
+    return queries[:5]
+
+
+def _step_decompose(client: Any, model: str, question: str) -> List[str]:
+    """Phase 0: 1 LLM call to decompose question into 3-5 keyword queries."""
+    msgs = [
+        {"role": "system", "content": "You decompose complex questions into keyword search queries."},
+        {"role": "user", "content": f"Decompose this question into 3-5 keyword search directions (3-5 words each):\n\n{question}\n\n{DECOMPOSE_PROMPT}"}
+    ]
+    raw = _strip_think(_chat(client, model, msgs, max_tokens=512))
+    queries = _parse_decompose_queries(raw)
+    return queries if queries else []
 
 
 def _parse_docids(text: str, results: List[Dict[str, Any]]) -> List[str]:
@@ -482,17 +534,22 @@ def run_agent_loop(
     tools: List[Dict[str, Any]], registry: Dict[str, Any],
     max_turns: int = 5, max_history_msgs: int = 6,
 ) -> Tuple[str, List[Dict[str, Any]]]:
-    """5-step deep research pipeline with structured memory."""
+    """5-step deep research pipeline with structured memory.
+    v3: pre-decomposes the question into keyword angles, cycles through them when stuck."""
 
     memory = AgentMemory()
     round_records: List[Dict[str, Any]] = []
     empty_rounds = 0
     suggested_query = ""  # from previous Step E
 
+    # ── v3 NEW: Phase 0 - decompose question into keyword angles ──
+    angle_pool = _step_decompose(client, model, query)
+    angle_idx = 0  # which pre-decomposed angle to try next
+
     for round_num in range(1, max_turns + 1):
         # ── Determine query ──
         if round_num == 1:
-            current_query = query  # Round 1: full question
+            current_query = query  # Round 1: full question (v2 default)
         else:
             current_query = suggested_query
 
@@ -510,7 +567,23 @@ def run_agent_loop(
             else:
                 break
 
-        # Rethink after 2+ empty rounds
+        # ── v3 NEW: no facts → immediately switch to next pre-decomposed angle ──
+        if round_num > 1 and empty_rounds >= 1:
+            # If model generated a query AND it differs from what we just searched, try it first
+            if suggested_query and not memory.has_searched(suggested_query):
+                current_query = suggested_query
+            elif angle_idx < len(angle_pool):
+                next_angle = angle_pool[angle_idx]
+                angle_idx += 1
+                if not memory.has_searched(next_angle):
+                    current_query = next_angle
+                    memory.add_note(f"Switching angle {angle_idx}/{len(angle_pool)}: {next_angle}")
+            elif not current_query or memory.has_searched(current_query):
+                fb = _fallback_query(query, memory)
+                if fb and not memory.has_searched(fb):
+                    current_query = fb
+
+        # Rethink after 2+ empty rounds (v2 original logic — still here)
         if round_num > 1 and empty_rounds >= 2:
             rethink_q = _step_rethink(client, model, query, memory)
             if rethink_q and not memory.has_searched(rethink_q):
@@ -585,6 +658,25 @@ def run_agent_loop(
     m = re.search(r'Exact Answer:\s*(.+?)(?:\n|$)', final_answer, re.IGNORECASE)
     if m:
         final_answer = m.group(1).strip()
+
+    # If still empty (all <think>), extract last meaningful content from records
+    if not final_answer.strip():
+        for rec in reversed(round_records):
+            for key in ("assess", "extract"):
+                txt = rec.get(key, "")
+                m = re.search(r'Exact Answer:\s*(.+)', txt, re.I)
+                if not m:
+                    # Try to get any factual statement
+                    for line in txt.split("\n"):
+                        if line.strip().startswith("- ") and len(line) > 10:
+                            final_answer = line.strip()
+                            break
+                if final_answer.strip():
+                    break
+            if final_answer.strip():
+                break
+        if not final_answer.strip():
+            final_answer = "Unable to determine answer from available evidence."
 
     trajectory = _build_trajectory(query, memory, round_records, final_answer)
     return final_answer, trajectory
