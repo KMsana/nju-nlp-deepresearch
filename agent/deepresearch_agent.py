@@ -176,28 +176,34 @@ class QueryAwareChunker:
 # Agent Prompts
 # ══════════════════════════════════════════════════════════════════════
 
-PLANNER_SYS = "Decompose complex questions into BM25-friendly keyword queries."
+# ── Unified system prompt (v2/v3 style: one identity for all steps) ──
+SYSTEM_PROMPT = (
+    "You are a Deep Research Agent. Your task is to answer complex questions "
+    "by searching a document corpus over multiple rounds. You maintain "
+    "structured memory of confirmed facts across rounds."
+)
 
-PLANNER_PROMPT = """Decompose this question into 3-5 keyword search directions (3-5 words each).
+PLANNER_PROMPT = """## Query Decomposition
+
+Break the question below into 3-5 distinct search directions.
 
 RULES:
-- Each direction = 3-5 English keywords (NOT sentences)
+- Each direction = 3-5 English keywords (NOT sentences, NOT questions)
 - Cover different angles: different entities, time periods, events, concepts
 - Use concrete, distinctive words that would appear VERBATIM in documents
 - BM25 does pure keyword matching — rare distinctive words dominate
 
-Output one direction per line with "- " prefix.
-
 Example:
-Question: A book published in the 1920s about Australian inland discoveries, by an author who married in the 1890s and wrote another book 1900-1910
+Question: A book published in the 1920s about Australian inland discoveries, by an author who married in the 1890s and wrote another book 1900-1910, with a barrel-shaped floating vessel on pages 332-339
 
 Output:
 - 1920s Australian inland exploration book
 - author married 1890s publisher Methuen
+- barrel-shaped floating vessel description
+- botanist Allan Cunningham spear attack
 - early Australian colonization 1906 book
-- botanist Allan Cunningham spear attack"""
 
-SCREEN_SYS = "Screen search results and select documents worth reading in full."
+Output one direction per line with "- " prefix. 3-5 keywords each."""
 
 SCREEN_PROMPT = """## Document Screening
 
@@ -207,14 +213,16 @@ Select at most 2 documents — pick only those whose snippets contain the most s
 Output:
 Relevant DocIDs: <comma-separated docids, or NONE>"""
 
-EXECUTOR_SYS = "Extract specific facts from documents. Find both relevant facts and dead ends."
-
 EXECUTOR_PROMPT = """## Fact Extraction
 
 Given the question and the full document texts above, classify your findings:
 
 ### Facts Found
-Specific, verifiable facts FROM the documents that are RELATED to the question. Each fact must cite concrete details (names, dates, titles, events) that appear in both the document and the question. If nothing relevant, write "None."
+List ONLY facts that match MULTIPLE constraints from the question — not just a single keyword.
+- A name alone is NOT a fact unless the document also connects it to other question details (dates, places, relationships).
+- If a document mentions a "librarian" but says nothing about Dakota, biography, or Europe visit — it is NOT a fact worth saving.
+- Each fact must cite concrete details (names, dates, titles, events) confirmed by the document AND relevant to the specific constraints.
+- If nothing matches multiple constraints, write "None."
 
 ### Dead Ends
 Candidates found in the documents that are CONFIRMED NOT to match one or more question constraints. Only list if there is POSITIVE evidence a candidate is wrong (e.g., "Book X was published in 1935" when question requires 1920s). "Not mentioned" is NOT a dead end. If none, write "None."
@@ -222,12 +230,9 @@ Candidates found in the documents that are CONFIRMED NOT to match one or more qu
 Output:
 Facts Found:
 - fact 1
-- fact 2
 
 Dead Ends:
 - candidate: why it violates which constraint"""
-
-ASSESSOR_SYS = "Audit research progress against question constraints. Decide next action."
 
 ASSESSOR_PROMPT = """## Progress Assessment
 
@@ -252,8 +257,6 @@ Status: NEED_MORE | READY_TO_ANSWER
 -- If NEED_MORE:
 Search Query: <keyword-query>"""
 
-RETHINK_SYS = "Find a genuinely new search direction when stuck."
-
 RETHINK_PROMPT = """## Rethink
 
 You have been searching without results for multiple rounds. Look at the question, confirmed facts, query history, and ruled-out candidates. Identify a GENUINELY NEW search direction — a different entity, angle, or constraint.
@@ -262,15 +265,17 @@ Output:
 New Direction: <what to pursue and why>
 Search Query: <keyword-query>"""
 
-SYNTHESIZER_SYS = "Answer the question based strictly on collected evidence."
-
 SYNTHESIZER_PROMPT = """## Final Answer
 
 All search rounds are complete. Based on all confirmed facts gathered through research, answer the question precisely.
-Only use the facts listed above as evidence. If evidence is insufficient, say so honestly.
+
+CRITICAL RULES:
+- Only use the facts listed above as evidence. DO NOT guess or hallucinate names.
+- If ANY constraint from the question still has "no evidence", say: Unable to determine from available evidence.
+- Only give a name/answer if ALL constraints are satisfied by confirmed facts.
 
 Output:
-Exact Answer: <the precise answer>"""
+Exact Answer: <the precise answer, or "Unable to determine from available evidence.">"""
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -478,7 +483,7 @@ def agent_plan(client, model, question: str,
         user = (f"## Question\n{question}\n\n"
                 f"## What We Already Know\n{extra_context}\n\n"
                 f"{PLANNER_PROMPT}\nFocus on what is still MISSING.")
-    msgs = [{"role": "system", "content": PLANNER_SYS},
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user}]
     raw = _strip_think(_chat(client, model, msgs, max_tok=512))
     return _parse_queries(raw)
@@ -486,19 +491,14 @@ def agent_plan(client, model, question: str,
 
 def agent_retrieve(registry: Dict, query: str, memory: AgentMemory,
                    searcher=None) -> List[Dict]:
-    """Retrieve + rerank: BM25 top-15 → ReRanker top-5."""
     memory.add_searched(query)
     search_fn = registry["search"]
     if searcher:
-        try:
-            raw = searcher.search(query, k=15)
-        except Exception:
-            raw = []
+        try: raw = searcher.search(query, k=15)
+        except Exception: raw = []
     else:
-        try:
-            raw = search_fn(query)
-        except Exception:
-            raw = []
+        try: raw = search_fn(query)
+        except Exception: raw = []
     if not raw:
         return []
     return ReRanker.rerank(query, raw, top_k=5) if len(raw) > 5 else raw
@@ -506,28 +506,23 @@ def agent_retrieve(registry: Dict, query: str, memory: AgentMemory,
 
 def agent_screen(client, model, question: str, results: List[Dict],
                  memory: AgentMemory) -> str:
-    """Screen agent: LLM picks ≤2 docs worth reading in full."""
     ctx = _build_context(question, memory)
     prompt = (f"{ctx}\n\n## Search Results\n{_format_results(results)}\n\n"
               f"{SCREEN_PROMPT}")
-    msgs = [{"role": "system", "content": SCREEN_SYS},
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
     return _chat(client, model, msgs, max_tok=512)
 
 
 def agent_fetch(registry: Dict, docids: List[str],
                 memory: AgentMemory) -> List[Dict]:
-    """Fetch full documents. Skips docids already fetched ≥2 times."""
     get_doc_fn = registry["get_document"]
     docs = []
     for did in docids[:3]:
         fc = memory.fetched_docids.get(did, 0)
-        if fc >= 2:
-            continue
-        try:
-            doc = get_doc_fn(did)
-        except Exception:
-            doc = None
+        if fc >= 2: continue
+        try: doc = get_doc_fn(did)
+        except Exception: doc = None
         if doc is None or (isinstance(doc, dict) and "error" in doc):
             docs.append({"docid": did, "error": "not found"})
         else:
@@ -540,36 +535,32 @@ def agent_fetch(registry: Dict, docids: List[str],
 
 def agent_execute(client, model, question: str, docs: List[Dict],
                   memory: AgentMemory, search_query: str = "") -> str:
-    """Executor agent: extract Facts + Dead Ends (natural language)."""
-    if not docs:
-        return ""
+    if not docs: return ""
     ctx = _build_context(question, memory)
     prompt = (f"{ctx}\n\n"
               f"## Full Documents\n{_format_docs(docs, search_query)}\n\n"
               f"{EXECUTOR_PROMPT}")
-    msgs = [{"role": "system", "content": EXECUTOR_SYS},
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
     return _chat(client, model, msgs, max_tok=2048)
 
 
 def agent_assess(client, model, question: str, memory: AgentMemory,
                  current_query: str) -> str:
-    """Assessor agent: constraint audit + next query."""
     extra = (f"Most recent query: \"{current_query}\"\n"
              f"Rounds searched: {len(memory.searched_queries)}")
     ctx = _build_context(question, memory, extra=extra)
     prompt = f"{ctx}\n\n{ASSESSOR_PROMPT}"
-    msgs = [{"role": "system", "content": ASSESSOR_SYS},
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
     return _chat(client, model, msgs, max_tok=1024)
 
 
 def agent_rethink(client, model, question: str,
                   memory: AgentMemory) -> str:
-    """Rethink agent: find a new direction when stuck."""
     ctx = _build_context(question, memory)
     prompt = f"{ctx}\n\n{RETHINK_PROMPT}"
-    msgs = [{"role": "system", "content": RETHINK_SYS},
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
     raw = _chat(client, model, msgs, max_tok=512)
     return _parse_search_query(raw)
@@ -577,10 +568,9 @@ def agent_rethink(client, model, question: str,
 
 def agent_synthesize(client, model, question: str,
                      memory: AgentMemory) -> str:
-    """Synthesizer agent: final answer from evidence."""
     ctx = _build_context(question, memory)
     prompt = f"{ctx}\n\n{SYNTHESIZER_PROMPT}"
-    msgs = [{"role": "system", "content": SYNTHESIZER_SYS},
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
     return _chat(client, model, msgs, max_tok=512)
 
@@ -768,14 +758,33 @@ def run_agent_loop(
         if status == "READY_TO_ANSWER":
             break
 
+        # ── Assessor → Planner feedback loop ──
+        # Parse what's still missing, feed to Planner for targeted re-decomposition
+        missing_info = _parse_section(assess_raw, "Missing Information")
         next_q = _parse_search_query(assess_raw)
-        if not next_q:
+
+        if missing_info and round_num >= 2:
+            # Feed missing info back to Planner → new targeted queries
+            ctx = "MISSING: " + "; ".join(missing_info[:5])
+            new_angles = agent_plan(client, model, query, extra_context=ctx)
+            if new_angles:
+                # Prepend new angles to pool (skip recent ones)
+                fresh = [q for q in new_angles if not memory.was_recent(q)]
+                if fresh:
+                    angle_pool = fresh + angle_pool
+                    angle_idx = 0
+
+        if next_q and not memory.was_recent(next_q):
+            suggested_query = next_q
+        elif angle_idx < len(angle_pool):
+            suggested_query = angle_pool[angle_idx]
+            angle_idx += 1
+        else:
             fb = _fallback_query(query, memory)
             if fb and not memory.was_recent(fb):
-                next_q = fb
+                suggested_query = fb
             else:
                 break
-        suggested_query = next_q
 
     # ── Synthesize ──
     answer_raw = agent_synthesize(client, model, query, memory)
