@@ -193,15 +193,6 @@ RULES:
 - Use concrete, distinctive words that would appear VERBATIM in documents
 - BM25 does pure keyword matching — rare distinctive words dominate
 
-Example:
-Question: A book published in the 1920s about Australian inland discoveries, by an author who married in the 1890s and wrote another book 1900-1910, with a barrel-shaped floating vessel on pages 332-339
-
-Output:
-- 1920s Australian inland exploration book
-- author married 1890s publisher Methuen
-- barrel-shaped floating vessel description
-- botanist Allan Cunningham spear attack
-- early Australian colonization 1906 book
 
 Output one direction per line with "- " prefix. 3-5 keywords each."""
 
@@ -485,7 +476,7 @@ def agent_plan(client, model, question: str,
                 f"{PLANNER_PROMPT}\nFocus on what is still MISSING.")
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user}]
-    raw = _strip_think(_chat(client, model, msgs, max_tok=512))
+    raw = _strip_think(_chat(client, model, msgs, max_tok=2048))
     return _parse_queries(raw)
 
 
@@ -511,7 +502,7 @@ def agent_screen(client, model, question: str, results: List[Dict],
               f"{SCREEN_PROMPT}")
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
-    return _chat(client, model, msgs, max_tok=512)
+    return _chat(client, model, msgs, max_tok=2048)
 
 
 def agent_fetch(registry: Dict, docids: List[str],
@@ -553,7 +544,7 @@ def agent_assess(client, model, question: str, memory: AgentMemory,
     prompt = f"{ctx}\n\n{ASSESSOR_PROMPT}"
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
-    return _chat(client, model, msgs, max_tok=1024)
+    return _chat(client, model, msgs, max_tok=2048)
 
 
 def agent_rethink(client, model, question: str,
@@ -562,7 +553,7 @@ def agent_rethink(client, model, question: str,
     prompt = f"{ctx}\n\n{RETHINK_PROMPT}"
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
-    raw = _chat(client, model, msgs, max_tok=512)
+    raw = _chat(client, model, msgs, max_tok=2048)
     return _parse_search_query(raw)
 
 
@@ -572,8 +563,7 @@ def agent_synthesize(client, model, question: str,
     prompt = f"{ctx}\n\n{SYNTHESIZER_PROMPT}"
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
-    return _chat(client, model, msgs, max_tok=512)
-
+    return _chat(client, model, msgs, max_tok=2048)
 
 # ══════════════════════════════════════════════════════════════════════
 # Trajectory builder
