@@ -287,15 +287,27 @@ Exact Answer: <the precise answer, or "Unable to determine from available eviden
 def _chat(client, model, msgs, max_tok=2048):
     try:
         r = client.simple_chat(model=model, messages=msgs,
-                               temperature=0.0, max_tokens=max_tok)
+                               temperature=0.0, max_tokens=max_tok,
+                               extra_payload={"chat_template_kwargs": {"enable_thinking": False}})
         return r["choices"][0]["message"]["content"]
     except Exception as e:
         return f"ERROR: {e}"
 
 
 def _strip_think(text: str) -> str:
-    t = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+    # Remove complete <think>...</think> blocks
+    t = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    # Remove unclosed <think>... to end
     t = re.sub(r'<think>.*$', '', t, flags=re.DOTALL).strip()
+    # If everything was in think tags, extract the inner content instead
+    if not t:
+        inner = re.findall(r'<think>(.*?)</think>', text, re.DOTALL)
+        if inner:
+            t = '\n'.join(s.strip() for s in inner if s.strip())
+    # Last resort: try to cut after the LAST </think>
+    if not t and '</think>' in text:
+        idx = text.rfind('</think>') + len('</think>')
+        t = text[idx:].strip()
     return t if t else text.strip()
 
 
@@ -662,12 +674,13 @@ def run_agent_loop(
     for round_num in range(1, max_turns + 1):
         # ── Determine query ──
         if round_num == 1:
-            # R1: use first Planner output, or full question as fallback
+            # R1: use first Planner output, or keyword extraction as fallback
             if angle_pool:
                 current_query = angle_pool[0]
                 angle_idx = 1
             else:
-                current_query = query
+                fb = _fallback_query(query, memory)
+                current_query = fb if fb else query
         else:
             current_query = suggested_query
 
