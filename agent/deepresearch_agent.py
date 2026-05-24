@@ -294,8 +294,19 @@ def _chat(client, model, msgs, max_tok=2048):
 
 
 def _strip_think(text: str) -> str:
-    t = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+    # Remove paired <think>...</think> blocks
+    t = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    # Remove unclosed <think>... to end
     t = re.sub(r'<think>.*$', '', t, flags=re.DOTALL).strip()
+    # If everything was in think tags, extract inner content
+    if not t:
+        inner = re.findall(r'<think>(.*?)</think>', text, re.DOTALL)
+        if inner:
+            t = '\n'.join(s.strip() for s in inner if s.strip())
+    # Last resort: cut after the LAST </think>
+    if not t and '</think>' in text:
+        idx = text.rfind('</think>') + len('</think>')
+        t = text[idx:].strip()
     return t if t else text.strip()
 
 
