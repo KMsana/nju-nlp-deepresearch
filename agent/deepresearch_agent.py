@@ -367,13 +367,6 @@ def _fmt_docs(docs: List[Dict], query: str = "") -> str:
 
 
 def _fallback_queries(question: str, qh: QueryHistory) -> List[str]:
-    cand = []
-    cand.extend(re.findall(r'"([^"]+)"', question))
-    cand.extend(re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', question))
-    cand.extend(re.findall(r'\b\d{3,4}\b', question))
-    words = re.findall(r'\b[a-zA-Z]{3,}\b', question)
-    for i in range(len(words) - 1):
-        cand.append(f"{words[i]} {words[i+1]}")
     stop = {'the', 'a', 'an', 'is', 'was', 'are', 'were', 'be', 'been',
             'in', 'on', 'at', 'to', 'for', 'of', 'from', 'by', 'with',
             'and', 'or', 'but', 'not', 'this', 'that', 'these', 'those',
@@ -381,6 +374,16 @@ def _fallback_queries(question: str, qh: QueryHistory) -> List[str]:
             'how', 'why', 'which', 'name', 'one', 'first', 'last', 'mid',
             'there', 'their', 'they', 'them', 'has', 'have', 'had', 'its',
             'also'}
+    cand = []
+    cand.extend(re.findall(r'"([^"]+)"', question))
+    cand.extend(re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', question))
+    cand.extend(re.findall(r'\b\d{3,4}\b', question))
+    words = re.findall(r'\b[a-zA-Z]{3,}\b', question)
+    for i in range(len(words) - 1):
+        w1, w2 = words[i].lower(), words[i+1].lower()
+        if w1 in stop and w2 in stop:
+            continue
+        cand.append(f"{words[i]} {words[i+1]}")
     dist = []
     for c in cand:
         cl = c.lower().strip()
@@ -409,7 +412,7 @@ def _plan(client, model, question: str, extra_context: str = "") -> List[str]:
             {"role": "user", "content": user}]
     raw = _strip(_chat(client, model, msgs, max_tok=512))
     queries = _parse_queries(raw)
-    return queries if queries else [question]
+    return queries  # empty list on failure — caller handles fallback
 
 
 def _execute(client, model, question: str,
@@ -576,10 +579,14 @@ def run_agent_loop(
     round_records: List[Dict] = []
     final_answer = ""
     empty_streak = 0
+    fetched_docids: Dict[str, int] = {}  # track how many times each docid was fetched
 
     all_queries = _plan(client, model, query)
     if not all_queries:
-        all_queries = [query]
+        # Planner failed — use regex keyword extraction instead of raw question
+        all_queries = _fallback_queries(query, qh)
+    if not all_queries:
+        all_queries = [query]  # last resort
 
     for rnd in range(1, max_turns + 1):
         rec: Dict[str, Any] = {"queries": list(all_queries)}
@@ -616,6 +623,10 @@ def run_agent_loop(
                 did = r.get("docid")
                 if not did:
                     continue
+                # Dead-loop guard: skip docids fetched ≥2 times already
+                fc = fetched_docids.get(did, 0)
+                if fc >= 2:
+                    continue
                 try:
                     doc = get_doc_fn(did)
                 except Exception:
@@ -624,6 +635,7 @@ def run_agent_loop(
                     all_docs.append({
                         "docid": did, "text": doc.get("text", ""),
                         "url": doc.get("url", "")})
+                    fetched_docids[did] = fc + 1
 
         rec["results"] = all_results
         rec["fetched"] = all_docs
