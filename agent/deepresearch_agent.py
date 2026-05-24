@@ -1,13 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-Deep Research Agent — Phase 1 refactored (single-file).
+Multi-Agent Deep Research System — Planner / Executor / Assess / Synthesizer.
 
-Key improvements over original:
-  - EvidenceStore: structured {fact, docid, confidence, source_quote} vs List[str]
-  - QueryHistory: sliding-window dedupe (window=2) vs permanent Mem.seen()
-  - Executor: JSON structured output vs natural language paragraphs
-  - Two-stage retrieval: BM25 top-15 → ReRanker → top-5
-  - QueryAwareChunker: query-relevant chunk selection vs text[:5000]
+Combines the multi-agent framework with v3's proven pipeline:
+  - Planner: decompose question → keyword queries
+  - Screen agent: LLM picks ≤2 docs from search results (v3 Step B)
+  - Executor: extract Facts + Dead Ends in NATURAL LANGUAGE (v3 Step D)
+  - Assessor: constraint audit + gap analysis + next query (v3 Step E)
+  - Synthesizer: final answer from structured evidence
+
+Phase 1 enhancements:
+  - ReRanker: BM25 top-15 → re-rank top-5 via term overlap
+  - QueryAwareChunker: query-relevant chunks vs text[:6000]
+  - EvidenceStore: structured {fact, docid, source_quote} tracking
+  - Sliding-window query dedupe (window=2) vs permanent has_searched
+  - Dead-loop guard: skip docids fetched ≥2 times
   - Real tool observations in trajectory
 """
 
@@ -20,104 +27,79 @@ from typing import Any, Dict, List, Tuple
 # Memory
 # ══════════════════════════════════════════════════════════════════════
 
-class EvidenceStore:
-    """Structured evidence storage — replaces plain List[str] findings."""
+class AgentMemory:
+    """Structured memory across rounds."""
 
     def __init__(self):
-        self._items: List[Dict] = []
-        self._fact_set: set = set()
-        self._ruled_out: List[Dict] = []
+        self.confirmed_facts: List[str] = []
+        self.searched_queries: List[str] = []
+        self.ruled_out: List[str] = []
+        self.read_docids: List[str] = []
+        self.pending_notes: List[str] = []
+        self.evidence: List[Dict] = []
+        self.fetched_docids: Dict[str, int] = {}
 
-    def add(self, fact: str, docid: str = "", query: str = "",
-            round_num: int = 0, confidence: str = "medium",
-            source_quote: str = "") -> bool:
+    def add_facts(self, facts: List[str]):
+        for f in facts:
+            if f and f not in self.confirmed_facts:
+                self.confirmed_facts.append(f)
+
+    def add_searched(self, query: str):
+        q = query.strip()
+        if q and q not in self.searched_queries:
+            self.searched_queries.append(q)
+
+    def was_recent(self, query: str, window: int = 2) -> bool:
+        q = query.strip().lower()
+        return any(q == r.lower() for r in self.searched_queries[-window:])
+
+    def has_searched(self, query: str) -> bool:
+        q = query.strip().lower()
+        return any(q == s.lower() for s in self.searched_queries)
+
+    def add_read(self, docid: str):
+        if docid not in self.read_docids:
+            self.read_docids.append(docid)
+
+    def add_ruled_out(self, item: str):
+        if item and item not in self.ruled_out:
+            self.ruled_out.append(item)
+
+    def add_note(self, note: str):
+        if note:
+            self.pending_notes.append(note)
+
+    def add_evidence(self, fact: str, docid: str = "", source_quote: str = ""):
         key = fact.strip().lower()
-        if not key or key in self._fact_set:
+        if any(e["fact"].strip().lower() == key for e in self.evidence):
             return False
-        self._fact_set.add(key)
-        self._items.append(dict(fact=fact.strip(), docid=docid, query=query,
-                                round=round_num, confidence=confidence,
-                                source_quote=source_quote))
+        self.evidence.append({"fact": fact.strip(), "docid": docid,
+                              "source_quote": source_quote})
         return True
 
-    def add_batch(self, evidence_list: List[Dict],
-                  query: str = "", round_num: int = 0) -> int:
-        added = 0
-        for e in evidence_list:
-            if isinstance(e, dict) and "fact" in e:
-                if self.add(e["fact"], e.get("docid", ""), query, round_num,
-                            e.get("confidence", "medium"), e.get("source_quote", "")):
-                    added += 1
-        return added
+    def facts_summary(self) -> str:
+        if not self.confirmed_facts:
+            return "(no confirmed facts yet)"
+        return "\n".join(f"- {f}" for f in self.confirmed_facts)
 
-    def get_all(self) -> List[Dict]:
-        return list(self._items)
+    def searched_summary(self) -> str:
+        if not self.searched_queries:
+            return "(none)"
+        return "\n".join(f"  [{i+1}] {q}"
+                         for i, q in enumerate(self.searched_queries))
 
-    def get_high_confidence(self) -> List[Dict]:
-        return [e for e in self._items if e["confidence"] == "high"]
+    def ruled_out_summary(self) -> str:
+        if not self.ruled_out:
+            return "(none)"
+        return "\n".join(f"- {r}" for r in self.ruled_out)
 
-    def has_fact(self, fact: str) -> bool:
-        return fact.strip().lower() in self._fact_set
-
-    def count(self) -> int:
-        return len(self._items)
-
-    def add_ruled_out(self, candidate: str, reason: str = ""):
-        c = candidate.strip()
-        if c and c not in {r["candidate"] for r in self._ruled_out}:
-            self._ruled_out.append({"candidate": c, "reason": reason})
-
-    def summary_for_context(self, max_items: int = 10) -> str:
-        if not self._items:
-            return "(no evidence collected yet)"
-        recent = self._items[-max_items:]
-        lines = []
-        for e in recent:
-            src = f" (doc: {e['docid']})" if e.get("docid") else ""
-            lines.append(f"- [{e['confidence']}]{src} {e['fact']}")
-        return "\n".join(lines)
-
-    def full_summary(self) -> str:
-        parts = [f"## Collected Evidence ({self.count()} items)"]
-        parts.append(self.summary_for_context(max_items=50))
-        if self._ruled_out:
-            parts.append("\n## Ruled Out\n" + "\n".join(
-                f"- {r['candidate']}: {r['reason']}"
-                for r in self._ruled_out[-5:]))
-        return "\n".join(parts)
-
-
-class QueryHistory:
-    """Sliding-window query dedupe — replaces permanent Mem.seen()."""
-
-    def __init__(self, window_size: int = 2):
-        self._queries: List[str] = []
-        self._window_size = window_size
-
-    def add(self, query: str):
-        q = query.strip()
-        if q:
-            self._queries.append(q)
-
-    def was_recent(self, query: str) -> bool:
-        """Only blocks repeats in last window_size entries. A→B→A passes."""
-        q = query.strip().lower()
-        if not q:
-            return False
-        return any(q == r.lower() for r in self._queries[-self._window_size:])
-
-    def was_ever_searched(self, query: str) -> bool:
-        q = query.strip().lower()
-        return any(q == prev.lower() for prev in self._queries)
-
-    def all_queries(self) -> List[str]:
-        return list(self._queries)
-
-    def recent_queries(self, n: int = 5) -> List[str]:
-        return self._queries[-n:]
-
-    def count(self) -> int:
-        return len(self._queries)
+    def evidence_summary(self, max_items: int = 10) -> str:
+        if not self.evidence:
+            return "(no structured evidence)"
+        recent = self.evidence[-max_items:]
+        return "\n".join(f"- {e['fact']}"
+                         + (f" (doc: {e['docid']})" if e.get("docid") else "")
+                         for e in recent)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -125,8 +107,6 @@ class QueryHistory:
 # ══════════════════════════════════════════════════════════════════════
 
 class ReRanker:
-    """Two-stage retrieval: BM25 top-15 → re-rank to top-5 via term overlap."""
-
     @staticmethod
     def _normalize_scores(results: List[Dict]) -> List[float]:
         scores = [r["score"] for r in results]
@@ -138,8 +118,7 @@ class ReRanker:
         q_terms = set(query.lower().split())
         if not q_terms:
             return 0.0
-        d_terms = set(text.lower().split())
-        return len(q_terms & d_terms) / len(q_terms)
+        return len(q_terms & set(text.lower().split())) / len(q_terms)
 
     @classmethod
     def rerank(cls, query: str, results: List[Dict],
@@ -155,12 +134,9 @@ class ReRanker:
 
 
 class QueryAwareChunker:
-    """Query-aware document chunking — replaces naive text[:5000]."""
-
     @staticmethod
     def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
-        chunks = []
-        start = 0
+        chunks, start = [], 0
         while start < len(text):
             end = min(start + chunk_size, len(text))
             chunks.append(text[start:end])
@@ -177,10 +153,8 @@ class QueryAwareChunker:
         return len(q_terms & set(chunk.lower().split()))
 
     @classmethod
-    def select_relevant_chunks(cls, query: str, text: str,
-                               max_chunks: int = 5,
-                               chunk_size: int = 1000,
-                               overlap: int = 200) -> str:
+    def select_relevant_chunks(cls, query: str, text: str, max_chunks: int = 5,
+                               chunk_size: int = 1000, overlap: int = 200) -> str:
         chunks = cls.chunk_text(text, chunk_size, overlap)
         if len(chunks) <= max_chunks:
             return text
@@ -192,104 +166,111 @@ class QueryAwareChunker:
 
     @classmethod
     def chunk_for_context(cls, query: str, text: str,
-                          max_total_chars: int = 5000) -> str:
+                          max_total_chars: int = 6000) -> str:
         max_chunks = max(1, max_total_chars // 1000)
         result = cls.select_relevant_chunks(query, text, max_chunks=max_chunks)
         return result[:max_total_chars] if len(result) > max_total_chars else result
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Prompts
+# Agent Prompts
 # ══════════════════════════════════════════════════════════════════════
 
-PLANNER_SYS = "Break complex questions into searchable sub-queries. Output one per line with '- ' prefix."
+PLANNER_SYS = "Decompose complex questions into BM25-friendly keyword queries."
 
-PLANNER_PROMPT = """Decompose this question into 3-5 search queries. Each query must include specific entities, dates, and details from the question. Output ONLY lines starting with '- '.
+PLANNER_PROMPT = """Decompose this question into 3-5 keyword search directions (3-5 words each).
+
+RULES:
+- Each direction = 3-5 English keywords (NOT sentences)
+- Cover different angles: different entities, time periods, events, concepts
+- Use concrete, distinctive words that would appear VERBATIM in documents
+- BM25 does pure keyword matching — rare distinctive words dominate
+
+Output one direction per line with "- " prefix.
 
 Example:
-Question: A restaurant founded in the 1950s in Chicago by a chef trained in France in the 1940s, with a signature dish technique on pages 50-55 of their cookbook. The chef's mentor worked at a Paris hotel in the 1920s. Name the first executive pastry chef.
+Question: A book published in the 1920s about Australian inland discoveries, by an author who married in the 1890s and wrote another book 1900-1910
 
 Output:
-- 1950s Chicago restaurant French-trained chef 1940s
-- signature dish cooking technique pages 50-55 cookbook
-- chef mentor Paris hotel 1920s
-- first executive pastry chef restaurant name"""
+- 1920s Australian inland exploration book
+- author married 1890s publisher Methuen
+- early Australian colonization 1906 book
+- botanist Allan Cunningham spear attack"""
 
-EXECUTOR_SYS = (
-    "You are a precise evidence extraction agent. "
-    "Extract specific, verifiable facts from documents as structured JSON. "
-    "Only include facts directly stated in the documents. Do not infer."
-)
+SCREEN_SYS = "Screen search results and select documents worth reading in full."
 
-EXECUTOR_PROMPT = """## Question
-{question}
+SCREEN_PROMPT = """## Document Screening
 
-## Documents
-{documents}
+Review the search results above. Decide which documents are worth reading in full.
+Select at most 2 documents — pick only those whose snippets contain the most specific, relevant content.
 
-## Task
-Extract ALL facts relevant to answering the question. Include supporting quotes.
+Output:
+Relevant DocIDs: <comma-separated docids, or NONE>"""
 
-Output ONLY a JSON array (no markdown fences, no other text):
-[
-  {{
-    "fact": "specific verifiable fact",
-    "docid": "source document ID",
-    "confidence": "high",
-    "source_quote": "exact supporting text from the document"
-  }}
-]
+EXECUTOR_SYS = "Extract specific facts from documents. Find both relevant facts and dead ends."
 
-Confidence: "high" (explicitly stated, exact match), "medium" (stated but some ambiguity), "low" (hinted/partial).
-If nothing relevant: output []"""
+EXECUTOR_PROMPT = """## Fact Extraction
 
-ASSESS_SYS = "Audit research progress. Check what is known, what is missing, and suggest next queries."
+Given the question and the full document texts above, classify your findings:
 
-ASSESS_PROMPT = """## Question
-{question}
+### Facts Found
+Specific, verifiable facts FROM the documents that are RELATED to the question. Each fact must cite concrete details (names, dates, titles, events) that appear in both the document and the question. If nothing relevant, write "None."
 
-{evidence_summary}
+### Dead Ends
+Candidates found in the documents that are CONFIRMED NOT to match one or more question constraints. Only list if there is POSITIVE evidence a candidate is wrong (e.g., "Book X was published in 1935" when question requires 1920s). "Not mentioned" is NOT a dead end. If none, write "None."
 
-## Query History
-{query_history}
+Output:
+Facts Found:
+- fact 1
+- fact 2
 
-## Task
-Audit progress. Output in this exact format:
+Dead Ends:
+- candidate: why it violates which constraint"""
+
+ASSESSOR_SYS = "Audit research progress against question constraints. Decide next action."
+
+ASSESSOR_PROMPT = """## Progress Assessment
+
+Check whether the confirmed facts satisfy all constraints, and decide next action.
+
+RULES:
+- List EVERY constraint from the question. Mark each as satisfied or no evidence.
+- If ALL constraints are satisfied: READY_TO_ANSWER
+- If any constraint lacks evidence: NEED_MORE
+- If facts contradict a constraint, that candidate is ruled out. Switch direction.
+
+BM25 does pure keyword matching — no semantics, no synonyms. Only exact word overlap counts. Rare distinctive words dominate.
+
+For NEED_MORE: pick 3-6 most DISTINCTIVE keywords that would appear VERBATIM in the target document.
+
+Output:
+Constraint Audit:
+- <constraint>: satisfied / no evidence
 
 Status: NEED_MORE | READY_TO_ANSWER
-Known Facts:
-- fact (source: docid)
-Missing Information:
-- specific detail still needed
-Next Queries:
-- keyword query 1
-- keyword query 2
 
-If all constraints are satisfied with high-confidence evidence, output READY_TO_ANSWER.
-If information is still missing, output NEED_MORE with specific next queries (3-6 distinctive keywords each)."""
+-- If NEED_MORE:
+Search Query: <keyword-query>"""
 
-RETHINK_PROMPT = """The query "{last_query}" found nothing useful.
+RETHINK_SYS = "Find a genuinely new search direction when stuck."
 
-Design a completely different search query — different angle, different keywords.
+RETHINK_PROMPT = """## Rethink
 
-Output exactly:
-Search Query: <3-5 keywords>"""
+You have been searching without results for multiple rounds. Look at the question, confirmed facts, query history, and ruled-out candidates. Identify a GENUINELY NEW search direction — a different entity, angle, or constraint.
 
-SYNTHESIZER_SYS = "Answer the question based strictly on the collected evidence. Do not fabricate."
+Output:
+New Direction: <what to pursue and why>
+Search Query: <keyword-query>"""
 
-SYNTHESIZER_PROMPT = """## Question
-{question}
+SYNTHESIZER_SYS = "Answer the question based strictly on collected evidence."
 
-{evidence_summary}
+SYNTHESIZER_PROMPT = """## Final Answer
 
-## Task
-Based on the evidence above, what is the answer? Be precise.
+All search rounds are complete. Based on all confirmed facts gathered through research, answer the question precisely.
+Only use the facts listed above as evidence. If evidence is insufficient, say so honestly.
 
-Output exactly:
-Exact Answer: <answer>
-
-If evidence is insufficient, output:
-Exact Answer: Unable to determine from available evidence."""
+Output:
+Exact Answer: <the precise answer>"""
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -305,9 +286,10 @@ def _chat(client, model, msgs, max_tok=2048):
         return f"ERROR: {e}"
 
 
-def _strip(text):
-    t = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    return re.sub(r'<think>.*', '', t, flags=re.DOTALL).strip() or text.strip()
+def _strip_think(text: str) -> str:
+    t = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+    t = re.sub(r'<think>.*$', '', t, flags=re.DOTALL).strip()
+    return t if t else text.strip()
 
 
 def _parse_queries(text: str) -> List[str]:
@@ -316,57 +298,103 @@ def _parse_queries(text: str) -> List[str]:
         s = line.strip()
         if s.startswith('-'):
             q = s[1:].strip().strip('"\'')
-            q = q.replace('**', '').replace('*', '').strip()
-            if len(q) >= 10:
+            words = q.split()
+            if 2 <= len(words) <= 10:
                 queries.append(q)
-    return queries
+    return queries[:5]
+
+
+def _parse_docids(text: str, results: List[Dict]) -> List[str]:
+    m = re.search(r'Relevant DocIDs:\s*', text, re.IGNORECASE)
+    if not m:
+        return []
+    rest = text[m.end():]
+    stop_headers = ["Status:", "Next Query:", "Reasoning:", "Key Facts:",
+                    "Explanation:", "Confidence:", "Thought:", "Action:",
+                    "Facts Found:", "Dead Ends:", "Constraint Audit:",
+                    "Exact Answer:", "New Direction:"]
+    content = []
+    for line in rest.split("\n"):
+        s = line.strip()
+        if not s:
+            break
+        if any(s.startswith(p) for p in stop_headers):
+            break
+        content.append(s)
+    c = " ".join(content).strip()
+    if not c or c.upper() == "NONE":
+        return []
+
+    docids = re.findall(r'\b(\d+)\b', c)
+    result_docids = [d['docid'] for d in results]
+    mapped, seen = [], set()
+    for d in docids:
+        if d in result_docids:
+            actual = d
+        elif d.isdigit() and 1 <= int(d) <= len(results):
+            actual = results[int(d) - 1]['docid']
+        else:
+            continue
+        if actual not in seen:
+            seen.add(actual)
+            mapped.append(actual)
+    return mapped[:2]
 
 
 def _parse_section(text: str, heading: str) -> List[str]:
     items, in_block = [], False
     pat = re.compile(re.escape(heading), re.I)
-    for line in text.split('\n'):
+    for line in text.split("\n"):
         s = line.strip()
         if pat.search(s):
             in_block = True
             continue
-        if in_block and s.startswith('-'):
+        if in_block and s.startswith("-"):
             items.append(s[1:].strip())
-        elif in_block and s and not s.startswith('-'):
+        elif in_block and s and not s.startswith("-"):
             break
     return items
 
 
-def _parse_json_output(raw: str) -> List[Dict]:
-    cleaned = _strip(raw)
-    fence = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', cleaned, re.DOTALL)
-    if fence:
-        cleaned = fence.group(1)
-    arr = re.search(r'\[.*\]', cleaned, re.DOTALL)
-    if not arr:
-        return []
-    try:
-        parsed = json.loads(arr.group(0))
-        if isinstance(parsed, list):
-            return [item for item in parsed
-                    if isinstance(item, dict) and "fact" in item]
-    except json.JSONDecodeError:
-        pass
+def _parse_facts(text: str) -> List[str]:
+    for h in ["Facts Found", "facts found", "Key Facts", "key facts"]:
+        f = _parse_section(text, h)
+        if f:
+            return [] if f in [["none"], ["None"], ["None."]] else f
     return []
 
 
-def _fmt_docs(docs: List[Dict], query: str = "") -> str:
-    parts = []
-    for i, d in enumerate(docs, 1):
-        text = d.get("text", d.get("error", ""))
-        chunked = QueryAwareChunker.chunk_for_context(
-            query if query else "", text, max_total_chars=5000)
-        parts.append(f"--- Doc {i} (docid={d['docid']}, "
-                     f"url={d.get('url', '')}) ---\n{chunked}")
-    return "\n\n".join(parts) if parts else "(no documents)"
+def _parse_dead_ends(text: str) -> List[str]:
+    d = _parse_section(text, "Dead Ends")
+    return [] if d in [["none"], ["None"], ["None."]] else d
 
 
-def _fallback_queries(question: str, qh: QueryHistory) -> List[str]:
+def _parse_status(text: str) -> str:
+    m = re.search(r'^Status:\s*(NEED_MORE|READY_TO_ANSWER)\s*$',
+                  text, re.I | re.M)
+    return m.group(1).upper() if m else "NEED_MORE"
+
+
+def _parse_search_query(text: str) -> str:
+    for pat in [r'Search Query:\s*"?(.+?)"?\s*$',
+                r'Search Query:\s*(.+?)\s*$']:
+        m = re.search(pat, text, re.I | re.M)
+        if m:
+            return m.group(1).strip().strip('"\'')
+    return ""
+
+
+def _fallback_query(question: str, memory: AgentMemory) -> str:
+    candidates = []
+    candidates.extend(re.findall(r'"([^"]+)"', question))
+    candidates.extend(re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b',
+                                 question))
+    candidates.extend(re.findall(r'\b\d{3,4}\b', question))
+    candidates.extend(re.findall(r'\b\d{1,2}(?:st|nd|rd|th)\b', question))
+    words = re.findall(r'\b[a-zA-Z]{3,}\b', question)
+    for i in range(len(words) - 1):
+        candidates.append(f"{words[i]} {words[i+1]}")
+
     stop = {'the', 'a', 'an', 'is', 'was', 'are', 'were', 'be', 'been',
             'in', 'on', 'at', 'to', 'for', 'of', 'from', 'by', 'with',
             'and', 'or', 'but', 'not', 'this', 'that', 'these', 'those',
@@ -374,35 +402,77 @@ def _fallback_queries(question: str, qh: QueryHistory) -> List[str]:
             'how', 'why', 'which', 'name', 'one', 'first', 'last', 'mid',
             'there', 'their', 'they', 'them', 'has', 'have', 'had', 'its',
             'also'}
-    cand = []
-    cand.extend(re.findall(r'"([^"]+)"', question))
-    cand.extend(re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', question))
-    cand.extend(re.findall(r'\b\d{3,4}\b', question))
-    words = re.findall(r'\b[a-zA-Z]{3,}\b', question)
-    for i in range(len(words) - 1):
-        w1, w2 = words[i].lower(), words[i+1].lower()
-        if w1 in stop and w2 in stop:
-            continue
-        cand.append(f"{words[i]} {words[i+1]}")
-    dist = []
-    for c in cand:
+    distinctive = []
+    for c in candidates:
         cl = c.lower().strip()
         if cl not in stop and len(cl) > 2:
-            dist.append(cl)
+            distinctive.append(cl)
+
     out = []
-    for t in dist:
-        if not qh.was_recent(t) and t not in out:
+    for t in distinctive:
+        if not memory.was_recent(t) and t not in out:
             out.append(t)
         if len(out) >= 5:
             break
-    return out
+    return " ".join(out[:5]) if out else ""
+
+
+def _format_results(results: List[Dict]) -> str:
+    lines = []
+    for i, doc in enumerate(results, 1):
+        snippet = doc.get('snippet', doc.get('text', ''))[:500]
+        lines.append(
+            f"Result {i} | DocID: {doc['docid']} | Score: {doc['score']:.1f}\n"
+            f"  {snippet}")
+    return "\n\n".join(lines) if lines else "(no results)"
+
+
+def _format_docs(docs: List[Dict], search_query: str = "",
+                 max_chars: int = 6000) -> str:
+    lines = []
+    for i, doc in enumerate(docs, 1):
+        text = doc.get("text", doc.get("error", ""))
+        if search_query and text and "error" not in doc:
+            text = QueryAwareChunker.chunk_for_context(
+                search_query, text, max_total_chars=max_chars)
+        elif len(text) > max_chars:
+            text = text[:max_chars] + "\n... [truncated]"
+        lines.append(f"--- Document {i} (docid={doc['docid']}) ---\n{text}")
+    return "\n\n".join(lines) if lines else "(no documents)"
+
+
+def _build_context(question: str, memory: AgentMemory,
+                   extra: str = "") -> str:
+    parts = [
+        f"## Question\n{question}",
+        f"\n## Confirmed Facts\n{memory.facts_summary()}",
+    ]
+    if memory.evidence:
+        parts.append(f"\n## Structured Evidence\n{memory.evidence_summary()}")
+    parts.extend([
+        f"\n## Ruled Out\n{memory.ruled_out_summary()}",
+        f"\n## Query History\n{memory.searched_summary()}",
+    ])
+    result = "\n".join(parts)
+    if len(result) > 20000:
+        facts = memory.confirmed_facts
+        while len(result) > 20000 and len(facts) > 3:
+            facts = facts[2:]
+            parts[1] = f"\n## Confirmed Facts\n" + (
+                "\n".join(f"- {f}" for f in facts) if facts else "(none)")
+            result = "\n".join(parts)
+    if extra:
+        result += f"\n\n{extra}"
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Agent functions
+# Multi-Agent functions
 # ══════════════════════════════════════════════════════════════════════
 
-def _plan(client, model, question: str, extra_context: str = "") -> List[str]:
+def agent_plan(client, model, question: str,
+               extra_context: str = "") -> List[str]:
+    """Planner agent: decompose question into keyword queries."""
     user = f"## Question\n{question}\n\n{PLANNER_PROMPT}"
     if extra_context:
         user = (f"## Question\n{question}\n\n"
@@ -410,155 +480,170 @@ def _plan(client, model, question: str, extra_context: str = "") -> List[str]:
                 f"{PLANNER_PROMPT}\nFocus on what is still MISSING.")
     msgs = [{"role": "system", "content": PLANNER_SYS},
             {"role": "user", "content": user}]
-    raw = _strip(_chat(client, model, msgs, max_tok=512))
-    queries = _parse_queries(raw)
-    return queries  # empty list on failure — caller handles fallback
+    raw = _strip_think(_chat(client, model, msgs, max_tok=512))
+    return _parse_queries(raw)
 
 
-def _execute(client, model, question: str,
-             docs: List[Dict], search_query: str = "") -> List[Dict]:
-    if not docs:
+def agent_retrieve(registry: Dict, query: str, memory: AgentMemory,
+                   searcher=None) -> List[Dict]:
+    """Retrieve + rerank: BM25 top-15 → ReRanker top-5."""
+    memory.add_searched(query)
+    search_fn = registry["search"]
+    if searcher:
+        try:
+            raw = searcher.search(query, k=15)
+        except Exception:
+            raw = []
+    else:
+        try:
+            raw = search_fn(query)
+        except Exception:
+            raw = []
+    if not raw:
         return []
-    msgs = [
-        {"role": "system", "content": EXECUTOR_SYS},
-        {"role": "user", "content": EXECUTOR_PROMPT.format(
-            question=question, documents=_fmt_docs(docs, search_query))},
-    ]
-    raw = _chat(client, model, msgs, max_tok=2048)
-    return _parse_json_output(raw)
+    return ReRanker.rerank(query, raw, top_k=5) if len(raw) > 5 else raw
 
 
-def _assess(client, model, question: str,
-            evidence: EvidenceStore, qh: QueryHistory) -> Dict:
-    queries_text = "\n".join(
-        f"  [{i+1}] {q}" for i, q in enumerate(qh.recent_queries(8))
-    ) or "(none)"
-
-    ctx = ASSESS_PROMPT.format(
-        question=question,
-        evidence_summary=evidence.full_summary(),
-        query_history=queries_text,
-    )
-    msgs = [{"role": "system", "content": ASSESS_SYS},
-            {"role": "user", "content": ctx}]
-    raw = _strip(_chat(client, model, msgs, max_tok=1024))
-
-    status = "READY_TO_ANSWER" if re.search(
-        r'\bREADY_TO_ANSWER\b', raw, re.I) else "NEED_MORE"
-    known = _parse_section(raw, "Known Facts")
-    missing = _parse_section(raw, "Missing Information")
-    next_queries = _parse_section(raw, "Next Queries")
-
-    if not next_queries and status == "NEED_MORE":
-        for m in re.finditer(
-            r'Search Query:\s*"?(.+?)"?\s*$', raw, re.I | re.M):
-            q = m.group(1).strip().strip('"\'')
-            q = q.replace('**', '').replace('*', '').strip()
-            if q:
-                next_queries.append(q)
-
-    return {"status": status, "known_facts": known,
-            "missing": missing, "next_queries": next_queries}
+def agent_screen(client, model, question: str, results: List[Dict],
+                 memory: AgentMemory) -> str:
+    """Screen agent: LLM picks ≤2 docs worth reading in full."""
+    ctx = _build_context(question, memory)
+    prompt = (f"{ctx}\n\n## Search Results\n{_format_results(results)}\n\n"
+              f"{SCREEN_PROMPT}")
+    msgs = [{"role": "system", "content": SCREEN_SYS},
+            {"role": "user", "content": prompt}]
+    return _chat(client, model, msgs, max_tok=512)
 
 
-def _synthesize(client, model, question: str,
-                evidence: EvidenceStore) -> str:
-    ctx = SYNTHESIZER_PROMPT.format(
-        question=question, evidence_summary=evidence.full_summary())
-    msgs = [{"role": "system", "content": SYNTHESIZER_SYS},
-            {"role": "user", "content": ctx}]
-    raw = _strip(_chat(client, model, msgs, max_tok=512))
-    m = re.search(r'Exact Answer:\s*(.+)', raw, re.I)
-    if m:
-        return m.group(1).strip()
-    for line in raw.split('\n'):
-        s = line.strip()
-        if s and len(s) > 5 and not s.startswith(('Exact Answer:', 'ERROR:')):
-            return s
-    return raw.strip() or "Unable to determine answer from available evidence."
+def agent_fetch(registry: Dict, docids: List[str],
+                memory: AgentMemory) -> List[Dict]:
+    """Fetch full documents. Skips docids already fetched ≥2 times."""
+    get_doc_fn = registry["get_document"]
+    docs = []
+    for did in docids[:3]:
+        fc = memory.fetched_docids.get(did, 0)
+        if fc >= 2:
+            continue
+        try:
+            doc = get_doc_fn(did)
+        except Exception:
+            doc = None
+        if doc is None or (isinstance(doc, dict) and "error" in doc):
+            docs.append({"docid": did, "error": "not found"})
+        else:
+            memory.add_read(did)
+            memory.fetched_docids[did] = fc + 1
+            docs.append({"docid": did, "text": doc.get("text", ""),
+                         "url": doc.get("url", "")})
+    return docs
 
 
-def _rethink(client, model, question: str, evidence: EvidenceStore,
-             qh: QueryHistory, last_query: str) -> str:
-    queries_text = "\n".join(
-        f"  [{i+1}] {q}" for i, q in enumerate(qh.recent_queries(8))
-    ) or "(none)"
-
-    ctx = (f"## Question\n{question}\n\n{evidence.full_summary()}\n\n"
-           f"## Query History\n{queries_text}\n\n"
-           f"{RETHINK_PROMPT.replace('{last_query}', last_query)}")
-    msgs = [
-        {"role": "system",
-         "content": "Fix failed search queries by designing new directions."},
-        {"role": "user", "content": ctx},
-    ]
-    try:
-        r = client.simple_chat(model=model, messages=msgs,
-                               temperature=0.0, max_tokens=512)
-        raw = r["choices"][0]["message"]["content"]
-    except Exception:
+def agent_execute(client, model, question: str, docs: List[Dict],
+                  memory: AgentMemory, search_query: str = "") -> str:
+    """Executor agent: extract Facts + Dead Ends (natural language)."""
+    if not docs:
         return ""
-    raw = _strip(raw)
-    m = re.search(r'Search Query:\s*"?(.+?)"?\s*$', raw, re.I | re.M)
-    return m.group(1).strip().strip('"\'') if m else ""
+    ctx = _build_context(question, memory)
+    prompt = (f"{ctx}\n\n"
+              f"## Full Documents\n{_format_docs(docs, search_query)}\n\n"
+              f"{EXECUTOR_PROMPT}")
+    msgs = [{"role": "system", "content": EXECUTOR_SYS},
+            {"role": "user", "content": prompt}]
+    return _chat(client, model, msgs, max_tok=2048)
+
+
+def agent_assess(client, model, question: str, memory: AgentMemory,
+                 current_query: str) -> str:
+    """Assessor agent: constraint audit + next query."""
+    extra = (f"Most recent query: \"{current_query}\"\n"
+             f"Rounds searched: {len(memory.searched_queries)}")
+    ctx = _build_context(question, memory, extra=extra)
+    prompt = f"{ctx}\n\n{ASSESSOR_PROMPT}"
+    msgs = [{"role": "system", "content": ASSESSOR_SYS},
+            {"role": "user", "content": prompt}]
+    return _chat(client, model, msgs, max_tok=1024)
+
+
+def agent_rethink(client, model, question: str,
+                  memory: AgentMemory) -> str:
+    """Rethink agent: find a new direction when stuck."""
+    ctx = _build_context(question, memory)
+    prompt = f"{ctx}\n\n{RETHINK_PROMPT}"
+    msgs = [{"role": "system", "content": RETHINK_SYS},
+            {"role": "user", "content": prompt}]
+    raw = _chat(client, model, msgs, max_tok=512)
+    return _parse_search_query(raw)
+
+
+def agent_synthesize(client, model, question: str,
+                     memory: AgentMemory) -> str:
+    """Synthesizer agent: final answer from evidence."""
+    ctx = _build_context(question, memory)
+    prompt = f"{ctx}\n\n{SYNTHESIZER_PROMPT}"
+    msgs = [{"role": "system", "content": SYNTHESIZER_SYS},
+            {"role": "user", "content": prompt}]
+    return _chat(client, model, msgs, max_tok=512)
 
 
 # ══════════════════════════════════════════════════════════════════════
 # Trajectory builder
 # ══════════════════════════════════════════════════════════════════════
 
-def _build_trajectory(question: str, evidence: EvidenceStore,
-                      qh: QueryHistory, round_records: List[Dict],
-                      final_answer: str) -> List[Dict[str, Any]]:
-    msgs: List[Dict[str, Any]] = [
-        {"role": "system", "content": "Deep research agent — structured evidence pipeline."},
+def _build_trajectory(question: str, memory: AgentMemory,
+                      round_records: List[Dict],
+                      final_answer: str) -> List[Dict]:
+    messages: List[Dict] = [
+        {"role": "system",
+         "content": "Multi-agent deep research system — Planner/Screen/Executor/Assess/Synthesizer."},
         {"role": "user", "content": question},
     ]
-    cid = 0
+    call_id = 0
     for rec in round_records:
+        # Search
         for q in rec.get("queries", []):
-            cid += 1
-            msgs.append({
+            call_id += 1
+            messages.append({
                 "role": "assistant", "content": "",
-                "tool_calls": [{
-                    "id": f"call_{cid}", "type": "function",
-                    "function": {"name": "search",
-                                 "arguments": json.dumps({"query": q},
-                                                         ensure_ascii=False)}}]})
-            results = rec.get("results", [])
-            msgs.append({
-                "role": "tool", "tool_call_id": f"call_{cid}",
+                "tool_calls": [{"id": f"call_{call_id}", "type": "function",
+                                "function": {"name": "search",
+                                             "arguments": json.dumps(
+                                                 {"query": q},
+                                                 ensure_ascii=False)}}]})
+            messages.append({
+                "role": "tool", "tool_call_id": f"call_{call_id}",
                 "content": json.dumps([
-                    {"docid": r["docid"], "score": r.get("score", 0),
-                     "snippet": (r.get("text", "") or "")[:300]}
-                    for r in results], ensure_ascii=False)})
-
+                    {"docid": d["docid"], "score": d.get("score", 0),
+                     "snippet": (d.get("text", "") or "")[:300]}
+                    for d in rec.get("results", [])
+                ], ensure_ascii=False)})
+        # Screen
+        messages.append({"role": "assistant", "content": rec.get("screen", "")})
+        # Get document
         fetched = rec.get("fetched", [])
         if fetched:
-            cid += 1
-            msgs.append({
+            call_id += 1
+            messages.append({
                 "role": "assistant", "content": "",
-                "tool_calls": [{
-                    "id": f"call_{cid}", "type": "function",
-                    "function": {"name": "get_document",
-                                 "arguments": json.dumps({"docid": d["docid"]},
-                                                         ensure_ascii=False)}}
-                    for d in fetched]})
-            msgs.append({
-                "role": "tool", "tool_call_id": f"call_{cid}",
+                "tool_calls": [{"id": f"call_{call_id}", "type": "function",
+                                "function": {"name": "get_document",
+                                             "arguments": json.dumps(
+                                                 {"docid": d["docid"]},
+                                                 ensure_ascii=False)}}
+                               for d in fetched]})
+            messages.append({
+                "role": "tool", "tool_call_id": f"call_{call_id}",
                 "content": json.dumps([
                     {"docid": d["docid"],
                      "text_preview": (d.get("text", "") or "")[:500],
                      "url": d.get("url", "")}
                     for d in fetched], ensure_ascii=False)})
+        # Executor output
+        messages.append({"role": "assistant", "content": rec.get("extract", "")})
+        # Assessor output
+        messages.append({"role": "assistant", "content": rec.get("assess", "")})
 
-        if rec.get("extract"):
-            msgs.append({"role": "assistant", "content": rec["extract"]})
-        if rec.get("assess"):
-            msgs.append({"role": "assistant", "content": rec["assess"]})
-
-    msgs.append({"role": "assistant", "content": final_answer})
-    return msgs
+    messages.append({"role": "assistant", "content": final_answer})
+    return messages
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -569,157 +654,135 @@ def run_agent_loop(
     client, model, query: str,
     tools: List[Dict], registry: Dict[str, Any],
     max_turns: int = 5, max_history_msgs: int = 6,
-) -> Tuple[str, List[Dict[str, Any]]]:
-    search_fn = registry["search"]
-    get_doc_fn = registry["get_document"]
+) -> Tuple[str, List[Dict]]:
+    """Multi-agent deep research — Planner/Screen/Executor/Assess/Synthesizer."""
+
+    memory = AgentMemory()
+    round_records: List[Dict] = []
+    empty_rounds = 0
+    suggested_query = ""
     searcher = registry.get("_searcher")
 
-    evidence = EvidenceStore()
-    qh = QueryHistory(window_size=2)
-    round_records: List[Dict] = []
-    final_answer = ""
-    empty_streak = 0
-    fetched_docids: Dict[str, int] = {}  # track how many times each docid was fetched
+    # Phase 0: Planner decomposes question → keyword query pool
+    angle_pool = agent_plan(client, model, query)
+    angle_idx = 0
 
-    all_queries = _plan(client, model, query)
-    if not all_queries:
-        # Planner failed — use regex keyword extraction instead of raw question
-        all_queries = _fallback_queries(query, qh)
-    if not all_queries:
-        all_queries = [query]  # last resort
-
-    for rnd in range(1, max_turns + 1):
-        rec: Dict[str, Any] = {"queries": list(all_queries)}
-        all_docs: List[Dict] = []
-        all_results: List[Dict] = []
-
-        # ── Search + Rerank + Fetch ──
-        for q in all_queries:
-            if not q or not q.strip():
-                continue
-            q = q.strip()
-            if qh.was_recent(q):
-                continue
-            qh.add(q)
-
-            if searcher:
-                try:
-                    raw_results = searcher.search(q, k=15)
-                except Exception:
-                    raw_results = []
+    for round_num in range(1, max_turns + 1):
+        # ── Determine query ──
+        if round_num == 1:
+            # R1: use first Planner output, or full question as fallback
+            if angle_pool:
+                current_query = angle_pool[0]
+                angle_idx = 1
             else:
-                try:
-                    raw_results = search_fn(q)
-                except Exception:
-                    raw_results = []
+                current_query = query
+        else:
+            current_query = suggested_query
 
-            if not raw_results:
-                continue
-
-            reranked = ReRanker.rerank(q, raw_results, top_k=5)
-            all_results.extend(reranked)
-
-            for r in reranked[:3]:
-                did = r.get("docid")
-                if not did:
-                    continue
-                # Dead-loop guard: skip docids fetched ≥2 times already
-                fc = fetched_docids.get(did, 0)
-                if fc >= 2:
-                    continue
-                try:
-                    doc = get_doc_fn(did)
-                except Exception:
-                    continue
-                if doc and "error" not in doc:
-                    all_docs.append({
-                        "docid": did, "text": doc.get("text", ""),
-                        "url": doc.get("url", "")})
-                    fetched_docids[did] = fc + 1
-
-        rec["results"] = all_results
-        rec["fetched"] = all_docs
-
-        if not all_docs:
-            empty_streak += 1
-            last_q = all_queries[0] if all_queries else ""
-            if last_q:
-                new_q = _rethink(client, model, query, evidence, qh, last_q)
-                if new_q and not qh.was_recent(new_q):
-                    all_queries = [new_q]
-                else:
-                    fb = _fallback_queries(query, qh)
-                    all_queries = fb if fb else []
+        if not current_query or not current_query.strip():
+            fb = _fallback_query(query, memory)
+            if fb and not memory.was_recent(fb):
+                current_query = fb
             else:
-                fb = _fallback_queries(query, qh)
-                all_queries = fb if fb else []
-
-            if not all_queries:
                 break
+
+        if memory.was_recent(current_query):
+            # Try next Planner angle
+            if angle_idx < len(angle_pool):
+                current_query = angle_pool[angle_idx]
+                angle_idx += 1
+            else:
+                fb = _fallback_query(query, memory)
+                if fb and not memory.was_recent(fb):
+                    current_query = fb
+                else:
+                    break
+
+        # Stuck: try rethink
+        if round_num > 1 and empty_rounds >= 2:
+            rethink_q = agent_rethink(client, model, query, memory)
+            if rethink_q and not memory.was_recent(rethink_q):
+                current_query = rethink_q
+                memory.add_note("Forced rethink — new direction")
+
+        # Empty rounds → try next Planner angle
+        if round_num > 1 and empty_rounds >= 1 and not memory.was_recent(current_query):
+            if suggested_query and not memory.was_recent(suggested_query):
+                current_query = suggested_query
+            elif angle_idx < len(angle_pool):
+                current_query = angle_pool[angle_idx]
+                angle_idx += 1
+                memory.add_note(f"Switching angle {angle_idx}/{len(angle_pool)}")
+
+        rec: Dict = {"queries": [current_query]}
+
+        # ── Retrieve + Rerank ──
+        results = agent_retrieve(registry, current_query, memory, searcher)
+        rec["results"] = results
+        if not results:
+            empty_rounds += 1
             continue
 
-        # ── Execute ──
-        search_q = all_queries[0] if all_queries else query
-        evidence_list = _execute(client, model, query, all_docs, search_q)
-        added = evidence.add_batch(evidence_list, query=search_q, round_num=rnd)
-        rec["extract"] = json.dumps(evidence_list, ensure_ascii=False)
+        # ── Screen: LLM picks docs ──
+        screen_raw = agent_screen(client, model, query, results, memory)
+        screen_raw = _strip_think(screen_raw)
+        rec["screen"] = screen_raw
+        docids = _parse_docids(screen_raw, results)
 
-        if added == 0:
-            empty_streak += 1
+        # ── Fetch (QueryAwareChunker + dead-loop guard) ──
+        docs = agent_fetch(registry, docids, memory) if docids else []
+        rec["fetched"] = docs
+
+        # ── Execute: extract Facts + Dead Ends ──
+        extract_raw = agent_execute(client, model, query, docs, memory,
+                                    current_query) if docs else ""
+        extract_raw = _strip_think(extract_raw)
+        rec["extract"] = extract_raw
+        new_facts = _parse_facts(extract_raw)
+        dead_ends = _parse_dead_ends(extract_raw)
+        memory.add_facts(new_facts)
+        for d in dead_ends:
+            memory.add_ruled_out(d)
+        for f in new_facts:
+            memory.add_evidence(f)
+
+        if new_facts:
+            empty_rounds = 0
         else:
-            empty_streak = 0
+            empty_rounds += 1
 
-        # ── Assess ──
-        assess_result = _assess(client, model, query, evidence, qh)
-        rec["assess"] = (
-            f"Status: {assess_result['status']}\n"
-            + (f"Known: {'; '.join(assess_result['known_facts'][:5])}\n"
-               if assess_result.get('known_facts') else "")
-            + (f"Missing: {'; '.join(assess_result['missing'][:5])}\n"
-               if assess_result.get('missing') else "")
-            + (f"Next Queries: {', '.join(assess_result['next_queries'][:5])}"
-               if assess_result.get('next_queries') else ""))
+        if empty_rounds >= 1 and memory.confirmed_facts:
+            memory.add_note("WARNING: no new facts — try different angle")
+        if dead_ends:
+            memory.add_note(
+                f"Dead ends: {', '.join(d for d in dead_ends[:3])}")
+
+        # ── Assess: constraint audit ──
+        assess_raw = agent_assess(client, model, query, memory, current_query)
+        assess_raw = _strip_think(assess_raw)
+        rec["assess"] = assess_raw
+
         round_records.append(rec)
+        status = _parse_status(assess_raw)
 
-        if assess_result["status"] == "READY_TO_ANSWER":
+        if status == "READY_TO_ANSWER":
             break
 
-        # ── Next queries (multi-query) ──
-        next_queries = assess_result.get("next_queries", [])
-        if next_queries:
-            filtered = [q for q in next_queries if not qh.was_recent(q)]
-            if filtered:
-                all_queries = filtered
-                continue
-
-        # ── Stuck: fallback chain ──
-        if empty_streak >= 2:
-            fb = _fallback_queries(query, qh)
-            if fb:
-                all_queries = fb
-                continue
-
-        last_q = next_queries[0] if next_queries else (
-            all_queries[0] if all_queries else "")
-        if last_q:
-            new_q = _rethink(client, model, query, evidence, qh, last_q)
-            if new_q and not qh.was_recent(new_q):
-                all_queries = [new_q]
-                continue
-
-        ctx = f"Findings so far: {evidence.summary_for_context(max_items=5)}"
-        new_queries = _plan(client, model, query, ctx)
-        if new_queries:
-            all_queries = [q for q in new_queries if not qh.was_recent(q)]
-            if all_queries:
-                continue
-
-        break
+        next_q = _parse_search_query(assess_raw)
+        if not next_q:
+            fb = _fallback_query(query, memory)
+            if fb and not memory.was_recent(fb):
+                next_q = fb
+            else:
+                break
+        suggested_query = next_q
 
     # ── Synthesize ──
-    final_answer = _synthesize(client, model, query, evidence)
-    if not final_answer or final_answer.startswith("ERROR"):
-        final_answer = "Unable to determine answer from available evidence."
+    answer_raw = agent_synthesize(client, model, query, memory)
+    final_answer = _strip_think(answer_raw)
+    m = re.search(r'Exact Answer:\s*(.+?)(?:\n|$)', final_answer, re.IGNORECASE)
+    if m:
+        final_answer = m.group(1).strip()
 
-    trajectory = _build_trajectory(query, evidence, qh, round_records, final_answer)
+    trajectory = _build_trajectory(query, memory, round_records, final_answer)
     return final_answer, trajectory
