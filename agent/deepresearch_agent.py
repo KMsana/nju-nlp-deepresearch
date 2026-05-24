@@ -649,6 +649,7 @@ def run_agent_loop(
 ) -> Tuple[str, List[Dict]]:
     """Multi-agent deep research — Planner/Screen/Executor/Assess/Synthesizer."""
 
+    print(f"[start] {query[:80]}...", flush=True)
     memory = AgentMemory()
     round_records: List[Dict] = []
     empty_rounds = 0
