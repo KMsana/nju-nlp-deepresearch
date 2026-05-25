@@ -177,11 +177,42 @@ class QueryAwareChunker:
 # Agent Prompts
 # ══════════════════════════════════════════════════════════════════════
 
-# ── Unified system prompt (v2/v3 style: one identity for all steps) ──
-SYSTEM_PROMPT = (
-    "You are a Deep Research Agent. Your task is to answer complex questions "
-    "by searching a document corpus over multiple rounds. You maintain "
-    "structured memory of confirmed facts across rounds."
+SYSTEM_PLANNER = (
+    "You decompose complex questions into BM25 keyword queries across multiple angles. "
+    "BM25 does pure keyword matching — no semantics, no synonyms. "
+    "Only exact word overlap counts. Rare distinctive words dominate."
+)
+
+SYSTEM_SCREEN = (
+    "You screen search results and decide which documents are worth reading in full. "
+    "Select only documents whose snippets show direct relevance to the question. "
+    "Do not guess — if nothing looks relevant, output NONE."
+)
+
+SYSTEM_EXECUTOR = (
+    "You extract specific verifiable facts from documents. "
+    "Only report information directly stated in the documents. "
+    "Do not infer, extrapolate, or hallucinate. "
+    "If nothing is relevant, honestly say None."
+)
+
+SYSTEM_ASSESSOR = (
+    "You audit research progress against every constraint in the question. "
+    "Be rigorous: check each constraint independently. "
+    "If any constraint lacks evidence, say NEED_MORE and suggest a new keyword query. "
+    "Only say READY_TO_ANSWER when ALL constraints are satisfied by confirmed facts."
+)
+
+SYSTEM_RETHINK = (
+    "You are stuck — previous searches found nothing. "
+    "Find a genuinely new search direction using different keywords, "
+    "a different entity, or a different angle than what was already tried."
+)
+
+SYSTEM_SYNTHESIZER = (
+    "You produce the final answer based strictly on collected evidence. "
+    "Base your answer only on confirmed facts. "
+    "If evidence is insufficient, say so honestly. Do not fabricate."
 )
 
 PLANNER_PROMPT = """## Query Decomposition
@@ -543,7 +574,7 @@ def agent_plan(client, model, question: str,
         user = (f"## Question\n{question}\n\n"
                 f"## What We Already Know\n{extra_context}\n\n"
                 f"{PLANNER_PROMPT}\nFocus on what is still MISSING.")
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
+    msgs = [{"role": "system", "content": SYSTEM_PLANNER},
             {"role": "user", "content": user}]
     raw = _strip_think(_chat(client, model, msgs, max_tok=2048))
     return _parse_queries(raw)
@@ -569,7 +600,7 @@ def agent_screen(client, model, question: str, results: List[Dict],
     ctx = ResearchContext(question, memory)
     prompt = (f"{ctx.for_screen()}\n\n## Search Results\n{_format_results(results)}\n\n"
               f"{SCREEN_PROMPT}")
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
+    msgs = [{"role": "system", "content": SYSTEM_SCREEN},
             {"role": "user", "content": prompt}]
     return _chat(client, model, msgs, max_tok=2048)
 
@@ -600,7 +631,7 @@ def agent_execute(client, model, question: str, docs: List[Dict],
     prompt = (f"{ctx.for_executor()}\n\n"
               f"## Full Documents\n{_format_docs(docs, search_query)}\n\n"
               f"{EXECUTOR_PROMPT}")
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
+    msgs = [{"role": "system", "content": SYSTEM_EXECUTOR},
             {"role": "user", "content": prompt}]
     return _chat(client, model, msgs, max_tok=2048)
 
@@ -609,7 +640,7 @@ def agent_assess(client, model, question: str, memory: AgentMemory,
                  current_query: str) -> str:
     ctx = ResearchContext(question, memory)
     prompt = f"{ctx.for_assessor(current_query)}\n\n{ASSESSOR_PROMPT}"
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
+    msgs = [{"role": "system", "content": SYSTEM_ASSESSOR},
             {"role": "user", "content": prompt}]
     return _chat(client, model, msgs, max_tok=2048)
 
@@ -618,7 +649,7 @@ def agent_rethink(client, model, question: str,
                   memory: AgentMemory) -> str:
     ctx = ResearchContext(question, memory)
     prompt = f"{ctx.for_assessor()}\n\n{RETHINK_PROMPT}"
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
+    msgs = [{"role": "system", "content": SYSTEM_RETHINK},
             {"role": "user", "content": prompt}]
     raw = _chat(client, model, msgs, max_tok=2048)
     return _parse_search_query(raw)
@@ -628,7 +659,7 @@ def agent_synthesize(client, model, question: str,
                      memory: AgentMemory) -> str:
     ctx = ResearchContext(question, memory)
     prompt = f"{ctx.for_synthesizer()}\n\n{SYNTHESIZER_PROMPT}"
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
+    msgs = [{"role": "system", "content": SYSTEM_SYNTHESIZER},
             {"role": "user", "content": prompt}]
     return _chat(client, model, msgs, max_tok=2048)
 
