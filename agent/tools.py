@@ -1,3 +1,4 @@
+import re
 from typing import Any, Callable, Dict, List, Tuple
 
 from .browsecomp_searcher import BrowseCompBM25Searcher, snippetize
@@ -86,6 +87,23 @@ def get_agent_tool_specs_and_registry(
             return {"docid": docid, "error": "document not found"}
         return doc
 
+    def find_in_doc(docid: str, keyword: str) -> Dict[str, Any]:
+        doc = searcher.get_document(docid)
+        if doc is None:
+            return {"docid": docid, "error": "document not found"}
+        text = doc.get("text", "")
+        if not text:
+            return {"docid": docid, "error": "document is empty"}
+        matches = [m.start() for m in re.finditer(re.escape(keyword), text, re.IGNORECASE)]
+        if not matches:
+            return {"docid": docid, "keyword": keyword, "message": "keyword not found"}
+        snippets = []
+        for idx in matches[:5]:
+            start = max(0, idx - 100)
+            end = min(len(text), idx + len(keyword) + 100)
+            snippets.append(text[start:end].replace('\n', ' '))
+        return {"docid": docid, "keyword": keyword, "match_count": len(matches), "snippets": snippets}
+
     tools = [
         {
             "type": "function",
@@ -118,5 +136,20 @@ def get_agent_tool_specs_and_registry(
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "find_in_doc",
+                "description": "Find a keyword within a document and return surrounding context.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "docid": {"type": "string", "description": "Document id"},
+                        "keyword": {"type": "string", "description": "Keyword to search within the document"},
+                    },
+                    "required": ["docid", "keyword"],
+                },
+            },
+        },
     ]
-    return tools, {"search": search, "get_document": get_document}
+    return tools, {"search": search, "get_document": get_document, "find_in_doc": find_in_doc, "_searcher": searcher}
