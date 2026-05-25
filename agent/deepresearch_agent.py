@@ -107,54 +107,34 @@ class ReRanker:
 
 # ── v3 Prompts ──────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = (
-    "You are a research agent. Search documents, collect facts, answer questions. "
-    "Output only the format requested. No markdown fences."
-)
-SYSTEM_SCREEN = (
-    "Screen Agent. Pick relevant documents from search results. If none look relevant, output NONE."
-)
-SYSTEM_EXECUTOR = (
-    "Executor Agent. Extract specific facts from documents. Report only what is directly stated."
-)
-SYSTEM_ASSESSOR = (
-    "Assessor Agent. Audit constraints. All satisfied → YES. Any missing → NO with new keywords."
-)
-SYSTEM_SYNTHESIZER = (
-    "You are a Synthesizer Agent. Answer the question using only confirmed facts. "
-    "If evidence is insufficient, say so honestly. Do not fabricate."
-)
+SYSTEM_PROMPT = "Research agent. Find facts, answer questions. Output the requested format only."
+SYSTEM_SCREEN = "Screen agent. Select relevant docs or output NONE."
+SYSTEM_EXECUTOR = "Executor agent. Extract stated facts from documents."
+SYSTEM_ASSESSOR = "Assessor agent. Audit constraints. YES if all satisfied, else NO + keywords."
+SYSTEM_SYNTHESIZER = "Synthesizer agent. Answer from facts only. Do not fabricate."
 
-DOC_SCREEN_PROMPT = """Pick at most 3 relevant documents. Output directly, do not explain why.
+DOC_SCREEN_PROMPT = """Pick relevant docs.
 
 Relevant DocIDs: <docids or NONE>"""
 
-FACT_EXTRACT_PROMPT = """Extract facts relevant to the question. Output directly with no explanation.
-
-Facts Found:
+FACT_EXTRACT_PROMPT = """Facts Found:
 - fact
-(use "None" if nothing)
+(None if nothing)
 
 Dead Ends:
 - candidate: why ruled out
-(use "None" if nothing)"""
+(None if nothing)"""
 
-PROGRESS_PROMPT = """Audit constraints. Output directly, no explanation.
-
-Constraint Audit:
+PROGRESS_PROMPT = """Constraint Audit:
 - constraint: satisfied / no evidence
 
 Status: YES | NO
 
-Search Query: <3-5 keywords>"""
+Search Query: <keywords>"""
 
-FINAL_ANSWER_PROMPT = """Answer using only the facts above. Output directly.
+FINAL_ANSWER_PROMPT = "Exact Answer:"
 
-Exact Answer:"""
-
-RETHINK_PROMPT = """Find a new search angle. Output directly, no explanation.
-
-Search Query: <3-5 keywords>"""
+RETHINK_PROMPT = "New angle. Search Query: <keywords>"
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
