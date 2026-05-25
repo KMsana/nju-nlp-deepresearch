@@ -108,7 +108,7 @@ class ReRanker:
 # ── v3 Prompts ──────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = (
-    "Research agent. Search documents, collect facts, answer questions. "
+    "You are a research agent. Search documents, collect facts, answer questions. "
     "Output only the format requested. No markdown fences."
 )
 
@@ -118,17 +118,15 @@ If none look relevant, output NONE.
 Output:
 Relevant DocIDs: <comma-separated docids, or NONE>"""
 
-FACT_EXTRACT_PROMPT = """Read these documents. List facts that help answer the question, and candidates that are ruled out.
+FACT_EXTRACT_PROMPT = """Extract facts relevant to the question. Mark candidates that violate constraints as dead ends.
 
-Output:
 Facts Found:
-- fact 1
-- fact 2
-(write "None" if nothing relevant)
+- fact
+(use "None" if nothing)
 
 Dead Ends:
-- candidate: why it violates a constraint
-(write "None" if nothing)"""
+- candidate: why ruled out
+(use "None" if nothing)"""
 
 PROGRESS_PROMPT = """Check each constraint from the question against the facts above.
 
