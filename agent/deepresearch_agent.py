@@ -22,18 +22,21 @@ from typing import Any, Dict, List, Tuple
 
 class AgentMemory:
     def __init__(self):
-        self.confirmed_facts: List[str] = []
+        self.facts: List[Dict] = []       # {fact, docid, round}
         self.searched_queries: List[str] = []
         self.ruled_out: List[str] = []
         self.read_docids: List[str] = []
-        self.pending_notes: List[str] = []
         self.fetched_docids: Dict[str, int] = {}
         self.last_assess: str = ""
+        self._fact_keys: set = set()
 
-    def add_facts(self, facts: List[str]):
-        for f in facts:
-            if f and f not in self.confirmed_facts:
-                self.confirmed_facts.append(f)
+    def add_fact(self, fact: str, docid: str = "", round_num: int = 0) -> bool:
+        key = fact.strip().lower()
+        if not key or key in self._fact_keys:
+            return False
+        self._fact_keys.add(key)
+        self.facts.append({"fact": fact.strip(), "docid": docid, "round": round_num})
+        return True
 
     def add_searched(self, query: str):
         q = query.strip()
@@ -56,14 +59,14 @@ class AgentMemory:
         if item and item not in self.ruled_out:
             self.ruled_out.append(item)
 
-    def add_note(self, note: str):
-        if note:
-            self.pending_notes.append(note)
-
     def facts_summary(self) -> str:
-        if not self.confirmed_facts:
-            return "(no confirmed facts yet)"
-        return "\n".join(f"- {f}" for f in self.confirmed_facts)
+        if not self.facts:
+            return "(no facts yet)"
+        lines = []
+        for f in self.facts[-15:]:  # show last 15
+            src = f" [doc {f['docid']}]" if f.get("docid") else ""
+            lines.append(f"- {f['fact']}{src}")
+        return "\n".join(lines)
 
     def searched_summary(self) -> str:
         if not self.searched_queries:
@@ -109,7 +112,7 @@ class ReRanker:
 
 SYSTEM_PROMPT = "Research agent. Find facts, answer questions. Output the requested format only."
 SYSTEM_SCREEN = "Screen agent. Select relevant docs or output NONE."
-SYSTEM_EXECUTOR = "Executor agent. Extract stated facts from documents."
+SYSTEM_EXECUTOR = "Executor agent. Extract stated facts from documents. Do not re-extract ruled-out candidates."
 SYSTEM_ASSESSOR = "Assessor agent. Audit constraints. YES if all satisfied, else NO + keywords."
 SYSTEM_SYNTHESIZER = "Synthesizer agent. Answer from facts only. Do not fabricate."
 
@@ -117,7 +120,7 @@ DOC_SCREEN_PROMPT = """Pick at most 2 relevant documents. If none, output NONE.
 
 Relevant DocIDs: ..."""
 
-FACT_EXTRACT_PROMPT = """Extract facts from these documents that help answer the question.
+FACT_EXTRACT_PROMPT = """Extract facts from these documents that help answer the question. Skip candidates already listed in Ruled Out.
 
 Facts Found:
 - ...
@@ -323,44 +326,39 @@ class ResearchContext:
 
     def _trim(self, parts: list) -> str:
         result = "\n".join(parts)
-        facts = self.m.confirmed_facts
+        facts = self.m.facts
         while len(result) > 20000 and len(facts) > 3:
             facts = facts[2:]
-            idx = next(i for i, p in enumerate(parts) if "## Confirmed Facts" in p)
-            parts[idx] = "\n## Confirmed Facts\n" + (
-                "\n".join(f"- {f}" for f in facts) if facts else "(none)")
+            idx = next(i for i, p in enumerate(parts) if "## Facts" in p)
+            summary = "\n".join(f"- {f['fact']}" for f in facts) if facts else "(none)"
+            parts[idx] = f"\n## Facts\n{summary}"
             result = "\n".join(parts)
         return result
 
     def for_screen(self) -> str:
-        """Screen: question + facts only — no query history to avoid bias."""
         return self._trim([f"## Question\n{self.q}",
-                           f"\n## Confirmed Facts\n{self.m.facts_summary()}"])
+                           f"\n## Facts\n{self.m.facts_summary()}"])
 
     def for_executor(self) -> str:
-        """Executor: question + facts + ruled out."""
         return self._trim([f"## Question\n{self.q}",
-                           f"\n## Confirmed Facts\n{self.m.facts_summary()}",
+                           f"\n## Facts\n{self.m.facts_summary()}",
                            f"\n## Ruled Out\n{self.m.ruled_out_summary()}"])
 
     def for_assessor(self, current_query: str = "") -> str:
-        """Assessor: everything — needs global view for constraint audit."""
         extra = (f"Most recent query: \"{current_query}\"\n"
                  f"Rounds searched: {len(self.m.searched_queries)}")
         return self._trim([
             f"## Question\n{self.q}",
-            f"\n## Confirmed Facts\n{self.m.facts_summary()}",
+            f"\n## Facts\n{self.m.facts_summary()}",
             f"\n## Ruled Out\n{self.m.ruled_out_summary()}",
             f"\n## Query History\n{self.m.searched_summary()}",
         ]) + f"\n\n{extra}"
 
     def for_synthesizer(self) -> str:
-        """Synthesizer: question + facts + assessor's constraint audit (no Status/Query)."""
         parts = [f"## Question\n{self.q}",
-                 f"\n## Confirmed Facts\n{self.m.facts_summary()}"]
+                 f"\n## Facts\n{self.m.facts_summary()}"]
         result = self._trim(parts)
         if self.m.last_assess:
-            # Only show Constraint Audit, strip Status/Search Query to avoid format confusion
             audit = self.m.last_assess
             audit = re.sub(r'Status:.*$', '', audit, flags=re.M | re.I)
             audit = re.sub(r'Search Query:.*$', '', audit, flags=re.M | re.I)
@@ -555,7 +553,6 @@ def run_agent_loop(
             rethink_q = _step_rethink(client, model, query, memory)
             if rethink_q and not memory.was_recent(rethink_q):
                 current_query = rethink_q
-                memory.add_note("Forced rethink — new direction")
 
         rec: Dict = {"query": current_query}
 
@@ -586,7 +583,10 @@ def run_agent_loop(
         rec["extract"] = extract_raw
         new_facts = _parse_facts(extract_raw)
         dead_ends = _parse_dead_ends(extract_raw)
-        memory.add_facts(new_facts)
+        # Store facts with source docid and round number
+        src_docid = docs[0]["docid"] if docs else ""
+        for f in new_facts:
+            memory.add_fact(f, docid=src_docid, round_num=round_num)
         for d in dead_ends:
             memory.add_ruled_out(d)
 
@@ -594,11 +594,6 @@ def run_agent_loop(
             empty_rounds = 0
         else:
             empty_rounds += 1
-
-        if empty_rounds >= 1 and memory.confirmed_facts:
-            memory.add_note("WARNING: no new facts — try different angle")
-        if dead_ends:
-            memory.add_note(f"Dead ends: {', '.join(d for d in dead_ends[:3])}")
 
         # ── Step E: Assess ──
         assess_raw = _step_assess(client, model, query, memory, current_query)
