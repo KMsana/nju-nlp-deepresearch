@@ -159,10 +159,10 @@ Status: YES | NO
 
 Search Query: <3-5 keywords>"""
 
-FINAL_ANSWER_PROMPT = """Answer the question using only the facts above. If facts are insufficient, say so.
+FINAL_ANSWER_PROMPT = """Answer using only the facts above. If insufficient, say: Unable to determine.
 
 Output:
-Exact Answer: <answer>"""
+Exact Answer:"""
 
 RETHINK_PROMPT = """You are stuck. All previous searches found nothing. Think of a completely different angle — new keywords, different entities.
 
@@ -621,10 +621,22 @@ def run_agent_loop(
 
     # ── Final answer ──
     answer_raw = _step_final_answer(client, model, query, memory)
-    final_answer = _strip_think(answer_raw)
-    m = re.search(r'Exact Answer:\s*(.+?)(?:\n|$)', final_answer, re.IGNORECASE)
+    # Try Exact Answer: format first
+    m = re.search(r'Exact Answer:\s*(.+?)(?:\n|$)', answer_raw, re.IGNORECASE)
     if m:
         final_answer = m.group(1).strip()
+    else:
+        # Fallback: strip think tags and take last meaningful line
+        t = re.sub(r'<think>.*?</think>', '', answer_raw, flags=re.DOTALL)
+        t = re.sub(r'<think>.*$', '', t, flags=re.DOTALL).strip()
+        if t:
+            final_answer = t
+        else:
+            # Everything was in think tags — extract inner content
+            inner = re.findall(r'<think>(.*?)</think>', answer_raw, re.DOTALL)
+            final_answer = '\n'.join(s.strip() for s in inner if s.strip()) if inner else answer_raw.strip()
+    if not final_answer or final_answer.startswith('ERROR'):
+        final_answer = 'Unable to determine from available evidence.'
 
     trajectory = _build_trajectory(query, memory, round_records, final_answer)
     return final_answer, trajectory
