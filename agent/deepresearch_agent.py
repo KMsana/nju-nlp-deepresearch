@@ -364,7 +364,7 @@ def _step_screen(client, model, question: str, results: List[Dict],
               f"{DOC_SCREEN_PROMPT}")
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
-    return _chat(client, model, msgs, max_tok=512)
+    return _chat(client, model, msgs, max_tok=1024)
 
 
 def _step_fetch(registry: Dict, docids: List[str],
@@ -429,7 +429,7 @@ def _step_rethink(client, model, question: str,
     prompt = f"{ctx}\n\n{RETHINK_PROMPT}"
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
-    raw = _chat(client, model, msgs, max_tok=512)
+    raw = _chat(client, model, msgs, max_tok=1024)
     return _parse_search_query(raw)
 
 
