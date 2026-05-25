@@ -113,28 +113,32 @@ SYSTEM_EXECUTOR = "Executor agent. Extract stated facts from documents."
 SYSTEM_ASSESSOR = "Assessor agent. Audit constraints. YES if all satisfied, else NO + keywords."
 SYSTEM_SYNTHESIZER = "Synthesizer agent. Answer from facts only. Do not fabricate."
 
-DOC_SCREEN_PROMPT = """Pick relevant docs.
+DOC_SCREEN_PROMPT = """Pick at most 2 relevant documents. If none, output NONE.
 
-Relevant DocIDs: <docids or NONE>"""
+Relevant DocIDs: ..."""
 
-FACT_EXTRACT_PROMPT = """Facts Found:
-- fact
+FACT_EXTRACT_PROMPT = """Extract facts from these documents that help answer the question.
+
+Facts Found:
+- ...
 (None if nothing)
 
 Dead Ends:
 - candidate: why ruled out
 (None if nothing)"""
 
-PROGRESS_PROMPT = """Constraint Audit:
+PROGRESS_PROMPT = """Audit each constraint from the question. BM25 matches exact words only.
+
+Constraint Audit:
 - constraint: satisfied / no evidence
 
 Status: YES | NO
 
-Search Query: <keywords>"""
+Search Query: ..."""
 
 FINAL_ANSWER_PROMPT = "Exact Answer:"
 
-RETHINK_PROMPT = "New angle. Search Query: <keywords>"
+RETHINK_PROMPT = "New search angle. Search Query: ..."
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -256,11 +260,15 @@ def _fallback_query(question: str, memory: AgentMemory) -> str:
     distinctive = []
     for c in candidates:
         cl = c.lower().strip()
-        if cl not in stop and len(cl) > 2:
+        # Filter: not stopword, len>2, not all digits, not placeholder
+        if cl not in stop and len(cl) > 2 and not cl.isdigit():
             distinctive.append(cl)
 
     out = []
     for t in distinctive:
+        # Filter out pure-digit sequences and placeholders
+        if t.isdigit() or all(w.isdigit() for w in t.split()):
+            continue
         if not memory.was_recent(t) and t not in out:
             out.append(t)
         if len(out) >= 5:
@@ -580,8 +588,10 @@ def run_agent_loop(
         if status == "YES":
             break
 
-        # Prepare next query
+        # Prepare next query (filter placeholders)
         next_q = _parse_search_query(assess_raw)
+        if next_q and ('<' in next_q or len(next_q.split()) < 2):
+            next_q = ""  # reject placeholders and single words
         if not next_q:
             fb = _fallback_query(query, memory)
             if fb and not memory.was_recent(fb):
