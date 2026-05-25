@@ -215,13 +215,26 @@ def _parse_facts(text: str) -> List[str]:
     for h in ["Facts Found", "facts found", "Key Facts", "key facts"]:
         f = _parse_section(text, h)
         if f:
-            return [] if f in [["none"], ["None"], ["None."]] else f
+            # Filter placeholder and "none" variants
+            clean = []
+            for item in f:
+                low = item.lower().strip()
+                if low in ("none", "none.", "(none)", "(none if nothing)", "...", ""):
+                    continue
+                clean.append(item)
+            return clean
     return []
 
 
 def _parse_dead_ends(text: str) -> List[str]:
     d = _parse_section(text, "Dead Ends")
-    return [] if d in [["none"], ["None"], ["None."]] else d
+    clean = []
+    for item in d:
+        low = item.lower().strip()
+        if low in ("none", "none.", "(none)", "(none if nothing)", "...", ""):
+            continue
+        clean.append(item)
+    return clean
 
 
 def _parse_status(text: str) -> str:
@@ -235,11 +248,20 @@ def _parse_search_query(text: str) -> str:
                 r'Search Query:\s*(.+?)\s*$']:
         m = re.search(pat, text, re.I | re.M)
         if m:
-            return m.group(1).strip().strip('"\'')
+            q = m.group(1).strip().strip('"\'')
+            if q and '...' not in q and '<' not in q:
+                return q
     return ""
 
 
 def _fallback_query(question: str, memory: AgentMemory) -> str:
+    stop = {'the', 'a', 'an', 'is', 'was', 'are', 'were', 'be', 'been',
+            'in', 'on', 'at', 'to', 'for', 'of', 'from', 'by', 'with',
+            'and', 'or', 'but', 'not', 'this', 'that', 'these', 'those',
+            'can', 'you', 'tell', 'find', 'what', 'when', 'where', 'who',
+            'how', 'why', 'which', 'name', 'one', 'first', 'last', 'mid',
+            'there', 'their', 'they', 'them', 'has', 'have', 'had', 'its',
+            'also'}
     candidates = []
     candidates.extend(re.findall(r'"([^"]+)"', question))
     candidates.extend(re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b',
@@ -248,15 +270,10 @@ def _fallback_query(question: str, memory: AgentMemory) -> str:
     candidates.extend(re.findall(r'\b\d{1,2}(?:st|nd|rd|th)\b', question))
     words = re.findall(r'\b[a-zA-Z]{3,}\b', question)
     for i in range(len(words) - 1):
-        candidates.append(f"{words[i]} {words[i+1]}")
+        w1, w2 = words[i].lower(), words[i+1].lower()
+        if w1 not in stop or w2 not in stop:  # at least one meaningful word
+            candidates.append(f"{words[i]} {words[i+1]}")
 
-    stop = {'the', 'a', 'an', 'is', 'was', 'are', 'were', 'be', 'been',
-            'in', 'on', 'at', 'to', 'for', 'of', 'from', 'by', 'with',
-            'and', 'or', 'but', 'not', 'this', 'that', 'these', 'those',
-            'can', 'you', 'tell', 'find', 'what', 'when', 'where', 'who',
-            'how', 'why', 'which', 'name', 'one', 'first', 'last', 'mid',
-            'there', 'their', 'they', 'them', 'has', 'have', 'had', 'its',
-            'also'}
     distinctive = []
     for c in candidates:
         cl = c.lower().strip()
