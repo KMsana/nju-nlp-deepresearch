@@ -116,32 +116,60 @@ SYSTEM_EXECUTOR = "Executor agent. Extract stated facts from documents. Do not r
 SYSTEM_ASSESSOR = "Assessor agent. Audit constraints. YES if all satisfied, else NO + keywords."
 SYSTEM_SYNTHESIZER = "Synthesizer agent. Answer from facts only. Do not fabricate."
 
-DOC_SCREEN_PROMPT = """Pick at most 2 relevant documents. If none, output NONE.
+DOC_SCREEN_PROMPT = """## Document Screening
 
-Relevant DocIDs: ..."""
+Review the search results above. Decide which documents are worth reading in full.
+Select at most 2 documents — pick only those whose snippets contain the most specific, relevant content.
 
-FACT_EXTRACT_PROMPT = """Extract facts from these documents that help answer the question. Skip candidates already listed in Ruled Out.
+Output:
+Relevant DocIDs: <comma-separated docids, or NONE>"""
 
+FACT_EXTRACT_PROMPT = """## Fact Extraction
+
+Given the question and the full document texts above, classify your findings:
+
+### Facts Found
+Specific, verifiable facts FROM the documents that are RELATED to the question. Each fact must cite concrete details (names, dates, titles, events). If nothing relevant, write "None."
+
+### Dead Ends
+Candidates found in the documents that are CONFIRMED NOT to match one or more question constraints. Only list if there is POSITIVE evidence a candidate is wrong. If none, write "None."
+
+Output:
 Facts Found:
-- ...
-(None if nothing)
+- fact 1
 
 Dead Ends:
-- candidate: why ruled out
-(None if nothing)"""
+- candidate: why it violates which constraint"""
 
-PROGRESS_PROMPT = """Audit each constraint from the question. BM25 matches exact words only.
+PROGRESS_PROMPT = """## Progress Assessment
 
+Check whether the confirmed facts satisfy all constraints, and decide next action.
+
+RULES:
+- List EVERY constraint from the question. Mark each as satisfied or no evidence.
+- If ALL constraints are satisfied: YES
+- If any constraint lacks evidence: NO
+
+BM25 does pure keyword matching — no semantics, no synonyms. Only exact word overlap counts.
+
+For NO: pick 3-6 most DISTINCTIVE keywords that would appear VERBATIM in the target document.
+
+Output:
 Constraint Audit:
-- constraint: satisfied / no evidence
+- <constraint>: satisfied / no evidence
 
 Status: YES | NO
 
-Search Query: ..."""
+Search Query: <keyword-query>"""
 
 FINAL_ANSWER_PROMPT = "If the facts above are sufficient to answer, write the answer. If not, write: Unable to determine.\n\nAnswer:"
 
-RETHINK_PROMPT = "New search angle. Search Query: ..."
+RETHINK_PROMPT = """## Rethink
+
+You have been searching without results. Look at the question, confirmed facts, query history, and ruled-out candidates. Identify a GENUINELY NEW search direction — a different entity, angle, or constraint.
+
+Output:
+Search Query: <keyword-query>"""
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
