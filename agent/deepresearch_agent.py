@@ -108,9 +108,8 @@ class ReRanker:
 # ── v3 Prompts ──────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = (
-    "You are a Deep Research Agent. Your job: answer questions by searching documents "
-    "over multiple rounds. You see accumulated facts from previous rounds. "
-    "Output ONLY the requested format — no greetings, no markdown fences."
+    "Research agent. Search documents, collect facts, answer questions. "
+    "Output only the format requested. No markdown fences."
 )
 
 DOC_SCREEN_PROMPT = """Pick at most 2 documents whose snippets look RELEVANT to the question.
