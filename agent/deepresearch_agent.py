@@ -137,7 +137,7 @@ If none look relevant, output NONE.
 Output:
 Relevant DocIDs: <comma-separated docids, or NONE>"""
 
-FACT_EXTRACT_PROMPT = """Extract only facts that help answer the SPECIFIC question above. A name alone is NOT a fact — the document must link it to the question's details (dates, places, events). If a document mentions a \"librarian\" but says nothing about Dakota or the biography in the question, it is NOT relevant.
+FACT_EXTRACT_PROMPT = """Extract only facts that help answer the SPECIFIC question above. A keyword match alone is NOT enough — the document must connect to the question's details (dates, places, relationships). If a document mentions a matching word but says nothing about the other constraints, it is NOT relevant.
 
 Facts Found:
 - fact
