@@ -111,8 +111,27 @@ SYSTEM_PROMPT = (
     "You are a research agent. Search documents, collect facts, answer questions. "
     "Output only the format requested. No markdown fences."
 )
+SYSTEM_SCREEN = (
+    "You are a Screen Agent. Read search result snippets and decide which documents "
+    "are worth reading in full. Pick only docs with clear relevance to the question. "
+    "If nothing looks relevant, say NONE."
+)
+SYSTEM_EXECUTOR = (
+    "You are an Executor Agent. Read full documents and extract specific verifiable "
+    "facts relevant to the question. Also identify candidates that are confirmed "
+    "NOT to match constraints (dead ends). Only report what is directly stated."
+)
+SYSTEM_ASSESSOR = (
+    "You are an Assessor Agent. Audit every constraint from the question against "
+    "confirmed facts. If all constraints satisfied → YES. If any missing → NO "
+    "and suggest 3-5 distinctive BM25 keywords. BM25 matches exact words only."
+)
+SYSTEM_SYNTHESIZER = (
+    "You are a Synthesizer Agent. Answer the question using only confirmed facts. "
+    "If evidence is insufficient, say so honestly. Do not fabricate."
+)
 
-DOC_SCREEN_PROMPT = """Pick at most 2 documents whose snippets look RELEVANT to the question.
+DOC_SCREEN_PROMPT = """Pick at most 3 documents whose snippets look RELEVANT to the question.
 If none look relevant, output NONE.
 
 Output:
@@ -378,7 +397,7 @@ def _step_screen(client, model, question: str, results: List[Dict],
     ctx = ResearchContext(question, memory).for_screen()
     prompt = (f"{ctx}\n\n## Search Results\n{_format_results(results)}\n\n"
               f"{DOC_SCREEN_PROMPT}")
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
+    msgs = [{"role": "system", "content": SYSTEM_SCREEN},
             {"role": "user", "content": prompt}]
     return _chat(client, model, msgs, max_tok=1024)
 
@@ -412,7 +431,7 @@ def _step_extract(client, model, question: str, docs: List[Dict],
     ctx = ResearchContext(question, memory).for_executor()
     prompt = (f"{ctx}\n\n## Full Documents\n{_format_docs(docs)}\n\n"
               f"{FACT_EXTRACT_PROMPT}")
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
+    msgs = [{"role": "system", "content": SYSTEM_EXECUTOR},
             {"role": "user", "content": prompt}]
     return _chat(client, model, msgs, max_tok=2048)
 
@@ -421,7 +440,7 @@ def _step_assess(client, model, question: str, memory: AgentMemory,
                  current_query: str) -> str:
     ctx = ResearchContext(question, memory).for_assessor(current_query)
     prompt = f"{ctx}\n\n{PROGRESS_PROMPT}"
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
+    msgs = [{"role": "system", "content": SYSTEM_ASSESSOR},
             {"role": "user", "content": prompt}]
     return _chat(client, model, msgs, max_tok=2048)
 
@@ -430,7 +449,7 @@ def _step_final_answer(client, model, question: str,
                        memory: AgentMemory) -> str:
     ctx = ResearchContext(question, memory).for_synthesizer()
     prompt = f"{ctx}\n\n{FINAL_ANSWER_PROMPT}"
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
+    msgs = [{"role": "system", "content": SYSTEM_SYNTHESIZER},
             {"role": "user", "content": prompt}]
     return _chat(client, model, msgs, max_tok=2048)
 
@@ -439,7 +458,7 @@ def _step_rethink(client, model, question: str,
                   memory: AgentMemory) -> str:
     ctx = ResearchContext(question, memory).for_assessor()
     prompt = f"{ctx}\n\n{RETHINK_PROMPT}"
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
+    msgs = [{"role": "system", "content": SYSTEM_ASSESSOR},
             {"role": "user", "content": prompt}]
     raw = _chat(client, model, msgs, max_tok=1024)
     return _parse_search_query(raw)
