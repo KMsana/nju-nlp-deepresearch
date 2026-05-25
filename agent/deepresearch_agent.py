@@ -136,7 +136,7 @@ Status: YES | NO
 
 Search Query: ..."""
 
-FINAL_ANSWER_PROMPT = "Exact Answer:"
+FINAL_ANSWER_PROMPT = "Answer the question using only the facts above. Output ONLY the answer text — do NOT output Status, Constraint Audit, or Keywords.\n\nAnswer:"
 
 RETHINK_PROMPT = "New search angle. Search Query: ..."
 
@@ -274,11 +274,12 @@ def _fallback_query(question: str, memory: AgentMemory) -> str:
         if w1 not in stop or w2 not in stop:  # at least one meaningful word
             candidates.append(f"{words[i]} {words[i+1]}")
 
+    seen = set()
     distinctive = []
     for c in candidates:
         cl = c.lower().strip()
-        # Filter: not stopword, len>2, not all digits, not placeholder
-        if cl not in stop and len(cl) > 2 and not cl.isdigit():
+        if cl not in stop and len(cl) > 2 and not cl.isdigit() and cl not in seen:
+            seen.add(cl)
             distinctive.append(cl)
 
     out = []
@@ -354,12 +355,18 @@ class ResearchContext:
         ]) + f"\n\n{extra}"
 
     def for_synthesizer(self) -> str:
-        """Synthesizer: question + facts + assessor's audit."""
+        """Synthesizer: question + facts + assessor's constraint audit (no Status/Query)."""
         parts = [f"## Question\n{self.q}",
                  f"\n## Confirmed Facts\n{self.m.facts_summary()}"]
         result = self._trim(parts)
         if self.m.last_assess:
-            result += f"\n\n## Assessor's Final Audit\n{self.m.last_assess[:2000]}"
+            # Only show Constraint Audit, strip Status/Search Query to avoid format confusion
+            audit = self.m.last_assess
+            audit = re.sub(r'Status:.*$', '', audit, flags=re.M | re.I)
+            audit = re.sub(r'Search Query:.*$', '', audit, flags=re.M | re.I)
+            audit = audit.strip()
+            if audit:
+                result += f"\n\n## Constraint Audit\n{audit[:2000]}"
         return result
 
 
@@ -619,8 +626,8 @@ def run_agent_loop(
 
     # ── Final answer ──
     answer_raw = _step_final_answer(client, model, query, memory)
-    # Try Exact Answer: format first
-    m = re.search(r'Exact Answer:\s*(.+?)(?:\n|$)', answer_raw, re.IGNORECASE)
+    # Try Answer: or Exact Answer: format
+    m = re.search(r'(?:Exact )?Answer:\s*(.+?)(?:\n|$)', answer_raw, re.IGNORECASE)
     if m:
         final_answer = m.group(1).strip()
     else:
@@ -633,6 +640,10 @@ def run_agent_loop(
             # Everything was in think tags — extract inner content
             inner = re.findall(r'<think>(.*?)</think>', answer_raw, re.DOTALL)
             final_answer = '\n'.join(s.strip() for s in inner if s.strip()) if inner else answer_raw.strip()
+    # Defensive: strip assessor format if leaked
+    if final_answer.startswith('Status:') or final_answer.startswith('NO') or final_answer.startswith('YES'):
+        final_answer = re.sub(r'^Status:\s*(YES|NO)\s*', '', final_answer).strip()
+        final_answer = re.sub(r'^(YES|NO)\s*[.\n]', '', final_answer).strip()
     if not final_answer or final_answer.startswith('ERROR'):
         final_answer = 'Unable to determine from available evidence.'
 
