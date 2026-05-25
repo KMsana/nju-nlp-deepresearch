@@ -316,27 +316,57 @@ def _format_docs(docs: List[Dict]) -> str:
     return "\n\n".join(lines) if lines else "(no documents)"
 
 
-def _build_context(question: str, memory: AgentMemory, extra: str = "") -> str:
-    parts = [
-        f"## Question\n{question}",
-        f"\n## Confirmed Facts\n{memory.facts_summary()}",
-        f"\n## Ruled Out\n{memory.ruled_out_summary()}",
-        f"\n## Query History\n{memory.searched_summary()}",
-    ]
-    result = "\n".join(parts)
-    if len(result) > 20000:
-        facts = memory.confirmed_facts
+class ResearchContext:
+    """Per-agent context — each step sees only what it needs (multi-agent via context isolation)."""
+
+    def __init__(self, question: str, memory: AgentMemory):
+        self.q = question
+        self.m = memory
+
+    def _trim(self, parts: list) -> str:
+        result = "\n".join(parts)
+        facts = self.m.confirmed_facts
         while len(result) > 20000 and len(facts) > 3:
             facts = facts[2:]
-            parts[1] = f"\n## Confirmed Facts\n" + (
+            idx = next(i for i, p in enumerate(parts) if "## Confirmed Facts" in p)
+            parts[idx] = "\n## Confirmed Facts\n" + (
                 "\n".join(f"- {f}" for f in facts) if facts else "(none)")
             result = "\n".join(parts)
-    if extra:
-        result += f"\n\n{extra}"
-    return result
+        return result
+
+    def for_screen(self) -> str:
+        """Screen: question + facts only — no query history to avoid bias."""
+        return self._trim([f"## Question\n{self.q}",
+                           f"\n## Confirmed Facts\n{self.m.facts_summary()}"])
+
+    def for_executor(self) -> str:
+        """Executor: question + facts + ruled out."""
+        return self._trim([f"## Question\n{self.q}",
+                           f"\n## Confirmed Facts\n{self.m.facts_summary()}",
+                           f"\n## Ruled Out\n{self.m.ruled_out_summary()}"])
+
+    def for_assessor(self, current_query: str = "") -> str:
+        """Assessor: everything — needs global view for constraint audit."""
+        extra = (f"Most recent query: \"{current_query}\"\n"
+                 f"Rounds searched: {len(self.m.searched_queries)}")
+        return self._trim([
+            f"## Question\n{self.q}",
+            f"\n## Confirmed Facts\n{self.m.facts_summary()}",
+            f"\n## Ruled Out\n{self.m.ruled_out_summary()}",
+            f"\n## Query History\n{self.m.searched_summary()}",
+        ]) + f"\n\n{extra}"
+
+    def for_synthesizer(self) -> str:
+        """Synthesizer: question + facts + assessor's audit."""
+        parts = [f"## Question\n{self.q}",
+                 f"\n## Confirmed Facts\n{self.m.facts_summary()}"]
+        result = self._trim(parts)
+        if self.m.last_assess:
+            result += f"\n\n## Assessor's Final Audit\n{self.m.last_assess[:2000]}"
+        return result
 
 
-# ── Pipeline steps ──────────────────────────────────────────────────
+# ── Pipeline steps (multi-agent via ResearchContext) ───────────────
 
 def _step_search(registry: Dict, query: str, memory: AgentMemory,
                  searcher=None) -> List[Dict]:
@@ -359,7 +389,7 @@ def _step_search(registry: Dict, query: str, memory: AgentMemory,
 
 def _step_screen(client, model, question: str, results: List[Dict],
                  memory: AgentMemory) -> str:
-    ctx = _build_context(question, memory)
+    ctx = ResearchContext(question, memory).for_screen()
     prompt = (f"{ctx}\n\n## Search Results\n{_format_results(results)}\n\n"
               f"{DOC_SCREEN_PROMPT}")
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
@@ -393,7 +423,7 @@ def _step_extract(client, model, question: str, docs: List[Dict],
                   memory: AgentMemory) -> str:
     if not docs:
         return ""
-    ctx = _build_context(question, memory)
+    ctx = ResearchContext(question, memory).for_executor()
     prompt = (f"{ctx}\n\n## Full Documents\n{_format_docs(docs)}\n\n"
               f"{FACT_EXTRACT_PROMPT}")
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
@@ -403,9 +433,7 @@ def _step_extract(client, model, question: str, docs: List[Dict],
 
 def _step_assess(client, model, question: str, memory: AgentMemory,
                  current_query: str) -> str:
-    extra = (f"Most recent query: \"{current_query}\"\n"
-             f"Rounds searched: {len(memory.searched_queries)}")
-    ctx = _build_context(question, memory, extra=extra)
+    ctx = ResearchContext(question, memory).for_assessor(current_query)
     prompt = f"{ctx}\n\n{PROGRESS_PROMPT}"
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
@@ -414,9 +442,7 @@ def _step_assess(client, model, question: str, memory: AgentMemory,
 
 def _step_final_answer(client, model, question: str,
                        memory: AgentMemory) -> str:
-    ctx = _build_context(question, memory)
-    if memory.last_assess:
-        ctx += f"\n\n## Assessor's Final Audit\n{memory.last_assess[:2000]}"
+    ctx = ResearchContext(question, memory).for_synthesizer()
     prompt = f"{ctx}\n\n{FINAL_ANSWER_PROMPT}"
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
@@ -425,7 +451,7 @@ def _step_final_answer(client, model, question: str,
 
 def _step_rethink(client, model, question: str,
                   memory: AgentMemory) -> str:
-    ctx = _build_context(question, memory)
+    ctx = ResearchContext(question, memory).for_assessor()
     prompt = f"{ctx}\n\n{RETHINK_PROMPT}"
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
