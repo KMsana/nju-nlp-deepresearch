@@ -112,32 +112,24 @@ SYSTEM_PROMPT = (
     "Output only the format requested. No markdown fences."
 )
 SYSTEM_SCREEN = (
-    "You are a Screen Agent. Read search result snippets and decide which documents "
-    "are worth reading in full. Pick only docs with clear relevance to the question. "
-    "If nothing looks relevant, say NONE."
+    "Screen Agent. Pick relevant documents from search results. If none look relevant, output NONE."
 )
 SYSTEM_EXECUTOR = (
-    "You are an Executor Agent. Read full documents and extract specific verifiable "
-    "facts relevant to the question. Also identify candidates that are confirmed "
-    "NOT to match constraints (dead ends). Only report what is directly stated."
+    "Executor Agent. Extract specific facts from documents. Report only what is directly stated."
 )
 SYSTEM_ASSESSOR = (
-    "You are an Assessor Agent. Audit every constraint from the question against "
-    "confirmed facts. If all constraints satisfied → YES. If any missing → NO "
-    "and suggest 3-5 distinctive BM25 keywords. BM25 matches exact words only."
+    "Assessor Agent. Audit constraints. All satisfied → YES. Any missing → NO with new keywords."
 )
 SYSTEM_SYNTHESIZER = (
     "You are a Synthesizer Agent. Answer the question using only confirmed facts. "
     "If evidence is insufficient, say so honestly. Do not fabricate."
 )
 
-DOC_SCREEN_PROMPT = """Pick at most 3 documents whose snippets look RELEVANT to the question.
-If none look relevant, output NONE.
+DOC_SCREEN_PROMPT = """Pick at most 3 relevant documents. Output directly, do not explain why.
 
-Output:
-Relevant DocIDs: <comma-separated docids, or NONE>"""
+Relevant DocIDs: <docids or NONE>"""
 
-FACT_EXTRACT_PROMPT = """Extract only facts that help answer the SPECIFIC question above. A keyword match alone is NOT enough — the document must connect to the question's details (dates, places, relationships). If a document mentions a matching word but says nothing about the other constraints, it is NOT relevant.
+FACT_EXTRACT_PROMPT = """Extract facts relevant to the question. Output directly with no explanation.
 
 Facts Found:
 - fact
@@ -147,11 +139,8 @@ Dead Ends:
 - candidate: why ruled out
 (use "None" if nothing)"""
 
-PROGRESS_PROMPT = """Check each constraint from the question against the facts above.
+PROGRESS_PROMPT = """Audit constraints. Output directly, no explanation.
 
-BM25 matches exact words only — no synonyms, no semantics. Pick 3-5 distinctive keywords for the next search.
-
-Output:
 Constraint Audit:
 - constraint: satisfied / no evidence
 
@@ -159,14 +148,12 @@ Status: YES | NO
 
 Search Query: <3-5 keywords>"""
 
-FINAL_ANSWER_PROMPT = """Answer using only the facts above. If insufficient, say: Unable to determine.
+FINAL_ANSWER_PROMPT = """Answer using only the facts above. Output directly.
 
-Output:
 Exact Answer:"""
 
-RETHINK_PROMPT = """Previous searches found nothing for the question above. Look at what was tried and find a NEW angle — different entities, different time periods, different keywords. Do NOT repeat any previous query.
+RETHINK_PROMPT = """Find a new search angle. Output directly, no explanation.
 
-Output:
 Search Query: <3-5 keywords>"""
 
 
@@ -572,6 +559,10 @@ def run_agent_loop(
         screen_raw = _strip_think(screen_raw)
         rec["screen"] = screen_raw
         docids = _parse_docids(screen_raw, results)
+
+        # Fallback: if Screen output is all think with no docids, take top-1
+        if not docids and results and '<think>' in screen_raw:
+            docids = [results[0]["docid"]]
 
         # ── Step C: Fetch ──
         docs = _step_fetch(registry, docids, memory) if docids else []
