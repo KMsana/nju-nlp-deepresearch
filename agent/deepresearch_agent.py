@@ -7,7 +7,7 @@ Pipeline per round:
   Step B: model screens results → picks ≤2 docids to read
   Step C: code-forced get_document
   Step D: model extracts facts + dead ends
-  Step E: model audits constraints → NEED_MORE / READY_TO_ANSWER
+  Step E: model audits constraints → NO (keep searching) / YES (answer ready)
 
 Kept from Phase 1: ReRanker, dead-loop guard, sliding-window dedupe.
 Removed: Planner phase 0, blind fetch fallback, context isolation, per-agent prompts.
@@ -139,7 +139,7 @@ Output:
 Constraint Audit:
 - constraint: satisfied / no evidence
 
-Status: NEED_MORE | READY_TO_ANSWER
+Status: YES | NO
 
 Search Query: <3-5 keywords>"""
 
@@ -238,9 +238,9 @@ def _parse_dead_ends(text: str) -> List[str]:
 
 
 def _parse_status(text: str) -> str:
-    m = re.search(r'^Status:\s*(NEED_MORE|READY_TO_ANSWER)\s*$',
+    m = re.search(r'^Status:\s*(YES|NO)\s*$',
                   text, re.I | re.M)
-    return m.group(1).upper() if m else "NEED_MORE"
+    return m.group(1).upper() if m else "NO"
 
 
 def _parse_search_query(text: str) -> str:
@@ -590,7 +590,7 @@ def run_agent_loop(
         round_records.append(rec)
         status = _parse_status(assess_raw)
 
-        if status == "READY_TO_ANSWER":
+        if status == "YES":
             break
 
         # Prepare next query
