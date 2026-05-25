@@ -108,22 +108,21 @@ class ReRanker:
 # ── v3 Prompts ──────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = (
-    "You are a Deep Research Agent. Your task is to answer complex questions "
-    "by searching a document corpus over multiple rounds. You maintain "
-    "structured memory of confirmed facts across rounds."
+    "You are a Deep Research Agent. Be concise — output only the requested format, no extra commentary. "
+    "Your task is to answer complex questions by searching a document corpus over multiple rounds. "
+    "You maintain structured memory of confirmed facts across rounds."
 )
 
 DOC_SCREEN_PROMPT = """## Document Screening
 
-Review the search results above. Decide which documents are worth reading in full.
-Select at most 2 documents — pick only those whose snippets contain the most specific, relevant content.
+Review the results. Pick at most 2 docs worth reading. Be brief — one line decision.
 
 Output:
 Relevant DocIDs: <comma-separated docids, or NONE>"""
 
 FACT_EXTRACT_PROMPT = """## Fact Extraction
 
-Given the question and the full document texts above, classify your findings:
+Extract facts and dead ends from these documents. Be brief — one sentence per fact.
 
 ### Facts Found
 Specific, verifiable facts FROM the documents that are RELATED to the question. Each fact must cite concrete details (names, dates, titles, events). If nothing relevant, write "None."
@@ -140,17 +139,7 @@ Dead Ends:
 
 PROGRESS_PROMPT = """## Progress Assessment
 
-Check whether the confirmed facts satisfy all constraints, and decide next action.
-
-RULES:
-- List EVERY constraint from the question. Mark each as satisfied or no evidence.
-- If ALL constraints are satisfied: READY_TO_ANSWER
-- If any constraint lacks evidence: NEED_MORE
-- If facts contradict a constraint, that candidate is ruled out. Switch direction.
-
-BM25 does pure keyword matching — no semantics, no synonyms. Only exact word overlap counts. Rare distinctive words dominate.
-
-For NEED_MORE: pick 3-6 most DISTINCTIVE keywords that would appear VERBATIM in the target document.
+Audit each constraint against confirmed facts. Be brief.
 
 Output:
 Constraint Audit:
@@ -158,23 +147,21 @@ Constraint Audit:
 
 Status: NEED_MORE | READY_TO_ANSWER
 
--- If NEED_MORE:
+If NEED_MORE:
 Search Query: <keyword-query>"""
 
 FINAL_ANSWER_PROMPT = """## Final Answer
 
-All search rounds are complete. Based on all confirmed facts gathered through research, answer the question precisely.
-Only use the facts listed above as evidence. If evidence is insufficient, say so honestly.
+Answer based only on confirmed facts. If insufficient, say: Unable to determine.
 
 Output:
-Exact Answer: <the precise answer>"""
+Exact Answer: <answer>"""
 
 RETHINK_PROMPT = """## Rethink
 
-You have been searching without results for multiple rounds. Look at the question, confirmed facts, query history, and ruled-out candidates. Identify a GENUINELY NEW search direction — a different entity, angle, or constraint.
+Stuck — suggest a completely new search direction.
 
 Output:
-New Direction: <what to pursue and why>
 Search Query: <keyword-query>"""
 
 
@@ -377,7 +364,7 @@ def _step_screen(client, model, question: str, results: List[Dict],
               f"{DOC_SCREEN_PROMPT}")
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
-    return _chat(client, model, msgs, max_tok=2048)
+    return _chat(client, model, msgs, max_tok=512)
 
 
 def _step_fetch(registry: Dict, docids: List[str],
@@ -442,7 +429,7 @@ def _step_rethink(client, model, question: str,
     prompt = f"{ctx}\n\n{RETHINK_PROMPT}"
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
-    raw = _chat(client, model, msgs, max_tok=2048)
+    raw = _chat(client, model, msgs, max_tok=512)
     return _parse_search_query(raw)
 
 
