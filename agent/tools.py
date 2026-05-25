@@ -119,4 +119,4 @@ def get_agent_tool_specs_and_registry(
             },
         },
     ]
-    return tools, {"search": search, "get_document": get_document, "_searcher": searcher}
+    return tools, {"search": search, "get_document": get_document}

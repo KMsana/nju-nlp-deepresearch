@@ -330,19 +330,29 @@ def _parse_docids(text: str, results: List[Dict]) -> List[str]:
     if not c or c.upper() == "NONE":
         return []
 
-    docids = re.findall(r'\b(\d+)\b', c)
     result_docids = [d['docid'] for d in results]
     mapped, seen = [], set()
-    for d in docids:
-        if d in result_docids:
-            actual = d
-        elif d.isdigit() and 1 <= int(d) <= len(results):
+
+    # 1. Exact docid substring match (supports any docid format)
+    for rid in result_docids:
+        if rid in c:
+            if rid not in seen:
+                seen.add(rid)
+                mapped.append(rid)
+            if len(mapped) >= 2:
+                return mapped
+
+    # 2. Fallback: numeric index mapping
+    num_docids = re.findall(r'\b(\d+)\b', c)
+    for d in num_docids:
+        if d.isdigit() and 1 <= int(d) <= len(results):
             actual = results[int(d) - 1]['docid']
-        else:
-            continue
-        if actual not in seen:
-            seen.add(actual)
-            mapped.append(actual)
+            if actual not in seen:
+                seen.add(actual)
+                mapped.append(actual)
+            if len(mapped) >= 2:
+                break
+
     return mapped[:2]
 
 
@@ -361,17 +371,22 @@ def _parse_section(text: str, heading: str) -> List[str]:
     return items
 
 
+def _clean_items(items: List[str]) -> List[str]:
+    ignore = {"none", "none.", ""}
+    return [i for i in items if i.lower().strip(".") not in ignore]
+
+
 def _parse_facts(text: str) -> List[str]:
     for h in ["Facts Found", "facts found", "Key Facts", "key facts"]:
         f = _parse_section(text, h)
         if f:
-            return [] if f in [["none"], ["None"], ["None."]] else f
+            return _clean_items(f)
     return []
 
 
 def _parse_dead_ends(text: str) -> List[str]:
     d = _parse_section(text, "Dead Ends")
-    return [] if d in [["none"], ["None"], ["None."]] else d
+    return _clean_items(d)
 
 
 def _parse_status(text: str) -> str:
@@ -446,29 +461,74 @@ def _format_docs(docs: List[Dict], search_query: str = "",
     return "\n\n".join(lines) if lines else "(no documents)"
 
 
-def _build_context(question: str, memory: AgentMemory,
-                   extra: str = "") -> str:
-    parts = [
-        f"## Question\n{question}",
-        f"\n## Confirmed Facts\n{memory.facts_summary()}",
-    ]
-    if memory.evidence:
-        parts.append(f"\n## Structured Evidence\n{memory.evidence_summary()}")
-    parts.extend([
-        f"\n## Ruled Out\n{memory.ruled_out_summary()}",
-        f"\n## Query History\n{memory.searched_summary()}",
-    ])
-    result = "\n".join(parts)
-    if len(result) > 20000:
-        facts = memory.confirmed_facts
-        while len(result) > 20000 and len(facts) > 3:
+class ResearchContext:
+    """Per-agent context manager — each agent sees only what it needs."""
+
+    def __init__(self, question: str, memory: AgentMemory):
+        self.q = question
+        self.m = memory
+
+    def _trim_facts(self, parts: list, max_chars: int = 20000):
+        """Trim oldest facts if context too long."""
+        result = "\n".join(parts)
+        facts = self.m.confirmed_facts
+        while len(result) > max_chars and len(facts) > 3:
             facts = facts[2:]
-            parts[1] = f"\n## Confirmed Facts\n" + (
+            idx = next((i for i, p in enumerate(parts)
+                        if p.startswith("\n## Confirmed Facts")), 1)
+            parts[idx] = "\n## Confirmed Facts\n" + (
                 "\n".join(f"- {f}" for f in facts) if facts else "(none)")
             result = "\n".join(parts)
-    if extra:
-        result += f"\n\n{extra}"
-    return result
+        return result
+
+    def for_planner(self, missing_info: str = "") -> str:
+        """Planner sees: question + (optional) what's still missing."""
+        parts = [f"## Question\n{self.q}"]
+        if missing_info:
+            parts.append(f"\n## Missing Information\n{missing_info}")
+        return "\n".join(parts)
+
+    def for_screen(self) -> str:
+        """Screen sees: question + confirmed facts (no query history to avoid bias)."""
+        parts = [
+            f"## Question\n{self.q}",
+            f"\n## Confirmed Facts\n{self.m.facts_summary()}",
+        ]
+        return self._trim_facts(parts)
+
+    def for_executor(self) -> str:
+        """Executor sees: question + facts + evidence + ruled out."""
+        parts = [
+            f"## Question\n{self.q}",
+            f"\n## Confirmed Facts\n{self.m.facts_summary()}",
+            f"\n## Ruled Out\n{self.m.ruled_out_summary()}",
+        ]
+        return self._trim_facts(parts)
+
+    def for_assessor(self, current_query: str = "") -> str:
+        """Assessor sees: everything — facts, evidence, ruled out, query history."""
+        parts = [
+            f"## Question\n{self.q}",
+            f"\n## Confirmed Facts\n{self.m.facts_summary()}",
+            f"\n## Ruled Out\n{self.m.ruled_out_summary()}",
+            f"\n## Query History\n{self.m.searched_summary()}",
+        ]
+        extra = (f"Most recent query: \"{current_query}\"\n"
+                 + f"Rounds searched: {len(self.m.searched_queries)}")
+        return self._trim_facts(parts) + f"\n\n{extra}"
+
+    def for_synthesizer(self) -> str:
+        """Synthesizer sees: question + facts + evidence + assessor's final audit."""
+        parts = [
+            f"## Question\n{self.q}",
+            f"\n## Confirmed Facts\n{self.m.facts_summary()}",
+        ]
+        if self.m.evidence:
+            parts.append(f"\n## Structured Evidence\n{self.m.evidence_summary()}")
+        result = self._trim_facts(parts)
+        if self.m.last_assess:
+            result += f"\n\n## Assessor's Final Audit\n{self.m.last_assess[:2000]}"
+        return result
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -506,8 +566,8 @@ def agent_retrieve(registry: Dict, query: str, memory: AgentMemory,
 
 def agent_screen(client, model, question: str, results: List[Dict],
                  memory: AgentMemory) -> str:
-    ctx = _build_context(question, memory)
-    prompt = (f"{ctx}\n\n## Search Results\n{_format_results(results)}\n\n"
+    ctx = ResearchContext(question, memory)
+    prompt = (f"{ctx.for_screen()}\n\n## Search Results\n{_format_results(results)}\n\n"
               f"{SCREEN_PROMPT}")
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
@@ -536,8 +596,8 @@ def agent_fetch(registry: Dict, docids: List[str],
 def agent_execute(client, model, question: str, docs: List[Dict],
                   memory: AgentMemory, search_query: str = "") -> str:
     if not docs: return ""
-    ctx = _build_context(question, memory)
-    prompt = (f"{ctx}\n\n"
+    ctx = ResearchContext(question, memory)
+    prompt = (f"{ctx.for_executor()}\n\n"
               f"## Full Documents\n{_format_docs(docs, search_query)}\n\n"
               f"{EXECUTOR_PROMPT}")
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
@@ -547,10 +607,8 @@ def agent_execute(client, model, question: str, docs: List[Dict],
 
 def agent_assess(client, model, question: str, memory: AgentMemory,
                  current_query: str) -> str:
-    extra = (f"Most recent query: \"{current_query}\"\n"
-             f"Rounds searched: {len(memory.searched_queries)}")
-    ctx = _build_context(question, memory, extra=extra)
-    prompt = f"{ctx}\n\n{ASSESSOR_PROMPT}"
+    ctx = ResearchContext(question, memory)
+    prompt = f"{ctx.for_assessor(current_query)}\n\n{ASSESSOR_PROMPT}"
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
     return _chat(client, model, msgs, max_tok=2048)
@@ -558,8 +616,8 @@ def agent_assess(client, model, question: str, memory: AgentMemory,
 
 def agent_rethink(client, model, question: str,
                   memory: AgentMemory) -> str:
-    ctx = _build_context(question, memory)
-    prompt = f"{ctx}\n\n{RETHINK_PROMPT}"
+    ctx = ResearchContext(question, memory)
+    prompt = f"{ctx.for_assessor()}\n\n{RETHINK_PROMPT}"
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
     raw = _chat(client, model, msgs, max_tok=2048)
@@ -568,11 +626,8 @@ def agent_rethink(client, model, question: str,
 
 def agent_synthesize(client, model, question: str,
                      memory: AgentMemory) -> str:
-    ctx = _build_context(question, memory)
-    # Include Assessor's constraint audit so Synthesizer knows what's satisfied
-    if memory.last_assess:
-        ctx += f"\n\n## Assessor's Final Audit\n{memory.last_assess[:2000]}"
-    prompt = f"{ctx}\n\n{SYNTHESIZER_PROMPT}"
+    ctx = ResearchContext(question, memory)
+    prompt = f"{ctx.for_synthesizer()}\n\n{SYNTHESIZER_PROMPT}"
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}]
     return _chat(client, model, msgs, max_tok=2048)
@@ -611,8 +666,7 @@ def _build_trajectory(question: str, memory: AgentMemory,
         # Screen
         messages.append({"role": "assistant", "content": rec.get("screen", "")})
         # Get document
-        fetched = rec.get("fetched", [])
-        if fetched:
+        for d in rec.get("fetched", []):
             call_id += 1
             messages.append({
                 "role": "assistant", "content": "",
@@ -620,15 +674,14 @@ def _build_trajectory(question: str, memory: AgentMemory,
                                 "function": {"name": "get_document",
                                              "arguments": json.dumps(
                                                  {"docid": d["docid"]},
-                                                 ensure_ascii=False)}}
-                               for d in fetched]})
+                                                 ensure_ascii=False)}}]})
             messages.append({
                 "role": "tool", "tool_call_id": f"call_{call_id}",
-                "content": json.dumps([
+                "content": json.dumps(
                     {"docid": d["docid"],
                      "text_preview": (d.get("text", "") or "")[:500],
-                     "url": d.get("url", "")}
-                    for d in fetched], ensure_ascii=False)})
+                     "url": d.get("url", "")},
+                    ensure_ascii=False)})
         # Executor output
         messages.append({"role": "assistant", "content": rec.get("extract", "")})
         # Assessor output
@@ -663,50 +716,47 @@ def run_agent_loop(
     for round_num in range(1, max_turns + 1):
         # ── Determine query ──
         if round_num == 1:
-            # R1: use first Planner output, or keyword extraction as fallback
+            current_query = angle_pool[0] if angle_pool else ""
             if angle_pool:
-                current_query = angle_pool[0]
                 angle_idx = 1
-            else:
-                fb = _fallback_query(query, memory)
-                current_query = fb if fb else query
         else:
             current_query = suggested_query
 
+        # Empty guard + fallback
         if not current_query or not current_query.strip():
-            fb = _fallback_query(query, memory)
-            if fb and not memory.was_recent(fb):
-                current_query = fb
-            else:
-                break
+            current_query = _fallback_query(query, memory)
 
+        # Dedup: if recent, try next angle or fallback
         if memory.was_recent(current_query):
-            # Try next Planner angle
             if angle_idx < len(angle_pool):
                 current_query = angle_pool[angle_idx]
                 angle_idx += 1
+            else:
+                current_query = _fallback_query(query, memory)
+            if not current_query or memory.was_recent(current_query):
+                break
+
+        # Stuck handling: state-machine based on empty_rounds severity
+        if round_num > 1 and empty_rounds >= 2:
+            rethink_q = agent_rethink(client, model, query, memory)
+            if rethink_q and not memory.was_recent(rethink_q):
+                current_query = rethink_q
+                memory.add_note("Forced rethink — new direction")
+            else:
+                break
+        elif round_num > 1 and empty_rounds >= 1:
+            if angle_idx < len(angle_pool) and not memory.was_recent(angle_pool[angle_idx]):
+                current_query = angle_pool[angle_idx]
+                angle_idx += 1
+                memory.add_note(f"Switching angle {angle_idx}/{len(angle_pool)}")
+            elif suggested_query and not memory.was_recent(suggested_query):
+                current_query = suggested_query
             else:
                 fb = _fallback_query(query, memory)
                 if fb and not memory.was_recent(fb):
                     current_query = fb
                 else:
                     break
-
-        # Stuck: try rethink
-        if round_num > 1 and empty_rounds >= 2:
-            rethink_q = agent_rethink(client, model, query, memory)
-            if rethink_q and not memory.was_recent(rethink_q):
-                current_query = rethink_q
-                memory.add_note("Forced rethink — new direction")
-
-        # Empty rounds → try next Planner angle
-        if round_num > 1 and empty_rounds >= 1 and not memory.was_recent(current_query):
-            if suggested_query and not memory.was_recent(suggested_query):
-                current_query = suggested_query
-            elif angle_idx < len(angle_pool):
-                current_query = angle_pool[angle_idx]
-                angle_idx += 1
-                memory.add_note(f"Switching angle {angle_idx}/{len(angle_pool)}")
 
         rec: Dict = {"queries": [current_query]}
 
@@ -715,6 +765,7 @@ def run_agent_loop(
         rec["results"] = results
         if not results:
             empty_rounds += 1
+            round_records.append(rec)
             continue
 
         # ── Screen: LLM picks docs ──
