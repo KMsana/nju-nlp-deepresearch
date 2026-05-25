@@ -139,7 +139,7 @@ Status: YES | NO
 
 Search Query: ..."""
 
-FINAL_ANSWER_PROMPT = "Answer the question using only the facts above. Output ONLY the answer text — do NOT output Status, Constraint Audit, or Keywords.\n\nAnswer:"
+FINAL_ANSWER_PROMPT = "If the facts above are sufficient to answer, write the answer. If not, write: Unable to determine.\n\nAnswer:"
 
 RETHINK_PROMPT = "New search angle. Search Query: ..."
 
@@ -635,11 +635,11 @@ def run_agent_loop(
             # Everything was in think tags — extract inner content
             inner = re.findall(r'<think>(.*?)</think>', answer_raw, re.DOTALL)
             final_answer = '\n'.join(s.strip() for s in inner if s.strip()) if inner else answer_raw.strip()
-    # Defensive: strip assessor format if leaked
-    if final_answer.startswith('Status:') or final_answer.startswith('NO') or final_answer.startswith('YES'):
-        final_answer = re.sub(r'^Status:\s*(YES|NO)\s*', '', final_answer).strip()
-        final_answer = re.sub(r'^(YES|NO)\s*[.\n]', '', final_answer).strip()
-    if not final_answer or final_answer.startswith('ERROR'):
+    # Defensive: if Synthesizer leaked assessor format, reject
+    final_answer = re.sub(r'^Status:\s*(YES|NO)\s*', '', final_answer).strip()
+    if final_answer.strip().upper() in ('YES', 'NO', ''):
+        final_answer = 'Unable to determine from available evidence.'
+    if final_answer.startswith('ERROR'):
         final_answer = 'Unable to determine from available evidence.'
 
     trajectory = _build_trajectory(query, memory, round_records, final_answer)
