@@ -108,61 +108,50 @@ class ReRanker:
 # ── v3 Prompts ──────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = (
-    "You are a Deep Research Agent. Be concise — output only the requested format, no extra commentary. "
-    "Your task is to answer complex questions by searching a document corpus over multiple rounds. "
-    "You maintain structured memory of confirmed facts across rounds."
+    "You are a Deep Research Agent. Your job: answer questions by searching documents "
+    "over multiple rounds. You see accumulated facts from previous rounds. "
+    "Output ONLY the requested format — no greetings, no markdown fences."
 )
 
-DOC_SCREEN_PROMPT = """## Document Screening
-
-Review the results. Pick at most 2 docs worth reading. Be brief — one line decision.
+DOC_SCREEN_PROMPT = """Pick at most 2 documents whose snippets look RELEVANT to the question.
+If none look relevant, output NONE.
 
 Output:
 Relevant DocIDs: <comma-separated docids, or NONE>"""
 
-FACT_EXTRACT_PROMPT = """## Fact Extraction
-
-Extract facts and dead ends from these documents. Be brief — one sentence per fact.
-
-### Facts Found
-Specific, verifiable facts FROM the documents that are RELATED to the question. Each fact must cite concrete details (names, dates, titles, events). If nothing relevant, write "None."
-
-### Dead Ends
-Candidates found in the documents that are CONFIRMED NOT to match one or more question constraints. Only list if there is POSITIVE evidence a candidate is wrong (e.g., "Book X was published in 1935" when question requires 1920s). "Not mentioned" is NOT a dead end. If none, write "None."
+FACT_EXTRACT_PROMPT = """Read these documents. List facts that help answer the question, and candidates that are ruled out.
 
 Output:
 Facts Found:
 - fact 1
+- fact 2
+(write "None" if nothing relevant)
 
 Dead Ends:
-- candidate: why it violates which constraint"""
+- candidate: why it violates a constraint
+(write "None" if nothing)"""
 
-PROGRESS_PROMPT = """## Progress Assessment
+PROGRESS_PROMPT = """Check each constraint from the question against the facts above.
 
-Audit each constraint against confirmed facts. Be brief.
+BM25 matches exact words only — no synonyms, no semantics. Pick 3-5 distinctive keywords for the next search.
 
 Output:
 Constraint Audit:
-- <constraint>: satisfied / no evidence
+- constraint: satisfied / no evidence
 
 Status: NEED_MORE | READY_TO_ANSWER
 
-If NEED_MORE:
-Search Query: <keyword-query>"""
+Search Query: <3-5 keywords>"""
 
-FINAL_ANSWER_PROMPT = """## Final Answer
-
-Answer based only on confirmed facts. If insufficient, say: Unable to determine.
+FINAL_ANSWER_PROMPT = """Answer the question using only the facts above. If facts are insufficient, say so.
 
 Output:
 Exact Answer: <answer>"""
 
-RETHINK_PROMPT = """## Rethink
-
-Stuck — suggest a completely new search direction.
+RETHINK_PROMPT = """You are stuck. All previous searches found nothing. Think of a completely different angle — new keywords, different entities.
 
 Output:
-Search Query: <keyword-query>"""
+Search Query: <3-5 keywords>"""
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
