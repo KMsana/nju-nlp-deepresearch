@@ -215,95 +215,47 @@ SYSTEM_SYNTHESIZER = (
     "If evidence is insufficient, say so honestly. Do not fabricate."
 )
 
-PLANNER_PROMPT = """## Query Decomposition
+PLANNER_PROMPT = """Decompose the question into 3-5 keyword search directions. Output one per line.
 
-Break the question below into 3-5 distinct search directions.
-
-RULES:
-- Each direction = 3-6 English KEYWORDS only (NOT a sentence, NOT a question)
-- NO parentheses (), NO commas, NO punctuation — just space-separated words
-- Cover different angles: entities, time periods, events, concepts
-- Use concrete, distinctive words that appear VERBATIM in documents
-- BM25 does pure keyword matching — rare distinctive words dominate
-
-BAD (too descriptive): "Magazine name (weekly, 1800s, $100 million)"
-GOOD (pure keywords): "weekly magazine 1800s 100 million dollars"
-
-Output one direction per line with "- " prefix, 3-6 keywords each."""
-
-SCREEN_PROMPT = """## Document Screening
-
-Review the search results above. Decide which documents are worth reading in full.
-Select at most 2 documents — pick only those whose snippets contain the most specific, relevant content.
+- Each line: 3-6 space-separated keywords (no sentences, no punctuation)
+- Cover different angles: entities, dates, events
+- Use distinctive words that appear verbatim in documents
 
 Output:
-Relevant DocIDs: <comma-separated docids, or NONE>"""
+- keyword1 keyword2 keyword3
+- keyword4 keyword5 keyword6"""
 
-EXECUTOR_PROMPT = """## Fact Extraction
+SCREEN_PROMPT = """Pick at most 2 documents worth reading. Output:
 
-Given the question and the full document texts above, classify your findings:
+Relevant DocIDs: <docid1, docid2 or NONE>"""
 
-### Facts Found
-Specific, verifiable facts FROM the documents that are RELATED to the question.
-- Each fact must cite concrete details (names, dates, titles, events) that appear in the document AND connect to the question's constraints.
-- It is OK if a single fact only addresses some constraints — we accumulate evidence across rounds.
-- Be honest: if a document contains a name but no other connection to the question, note it but explain the gap.
-- If nothing relevant, write "None."
+EXECUTOR_PROMPT = """Extract facts and dead ends from these documents.
 
-### Dead Ends
-Candidates found in the documents that are CONFIRMED NOT to match one or more question constraints. Only list if there is POSITIVE evidence a candidate is wrong (e.g., "Book X was published in 1935" when question requires 1920s). "Not mentioned" is NOT a dead end. If none, write "None."
-
-Output:
 Facts Found:
-- fact 1
-- fact 2
+- specific fact from the document relevant to the question
+- (write "None" if nothing relevant)
 
 Dead Ends:
-- candidate: why it violates which constraint"""
+- candidate: why it violates a constraint
+- (write "None" if nothing)"""
 
-ASSESSOR_PROMPT = """## Progress Assessment
+ASSESSOR_PROMPT = """Audit each constraint from the question against confirmed facts.
 
-Check whether the confirmed facts satisfy all constraints, and decide next action.
-
-RULES:
-- List EVERY constraint from the question. Mark each as satisfied or no evidence.
-- If ALL constraints are satisfied: READY_TO_ANSWER
-- If any constraint lacks evidence: NEED_MORE
-- If facts contradict a constraint, that candidate is ruled out. Switch direction.
-
-BM25 does pure keyword matching — no semantics, no synonyms. Only exact word overlap counts. Rare distinctive words dominate.
-
-For NEED_MORE: pick 3-6 most DISTINCTIVE keywords that would appear VERBATIM in the target document.
-
-Output:
 Constraint Audit:
-- <constraint>: satisfied / no evidence
+- constraint: satisfied / no evidence
 
 Status: NEED_MORE | READY_TO_ANSWER
 
--- If NEED_MORE:
-Search Query: <keyword-query>"""
+If NEED_MORE:
+Search Query: <3-6 keywords>"""
 
-RETHINK_PROMPT = """## Rethink
+RETHINK_PROMPT = """Previous searches found nothing. Suggest a completely different search direction.
 
-You have been searching without results for multiple rounds. Look at the question, confirmed facts, query history, and ruled-out candidates. Identify a GENUINELY NEW search direction — a different entity, angle, or constraint.
+Search Query: <3-6 keywords>"""
 
-Output:
-New Direction: <what to pursue and why>
-Search Query: <keyword-query>"""
+SYNTHESIZER_PROMPT = """Answer based only on confirmed facts. If insufficient, say: Unable to determine.
 
-SYNTHESIZER_PROMPT = """## Final Answer
-
-All search rounds are complete. Based on all confirmed facts gathered through research, answer the question precisely.
-
-RULES:
-- Base your answer only on the confirmed facts and evidence above.
-- If the evidence clearly supports a specific answer, state it confidently.
-- If evidence is insufficient or contradictory, say: Unable to determine from available evidence.
-- DO NOT fabricate names or details that do not appear in the facts.
-
-Output:
-Exact Answer: <the precise answer, or "Unable to determine from available evidence.">"""
+Exact Answer: <answer>"""
 
 
 # ══════════════════════════════════════════════════════════════════════
