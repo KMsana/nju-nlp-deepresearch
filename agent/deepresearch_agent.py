@@ -137,7 +137,7 @@ If none look relevant, output NONE.
 Output:
 Relevant DocIDs: <comma-separated docids, or NONE>"""
 
-FACT_EXTRACT_PROMPT = """Extract facts relevant to the question. Mark candidates that violate constraints as dead ends.
+FACT_EXTRACT_PROMPT = """Extract only facts that help answer the SPECIFIC question above. A name alone is NOT a fact — the document must link it to the question's details (dates, places, events). If a document mentions a \"librarian\" but says nothing about Dakota or the biography in the question, it is NOT relevant.
 
 Facts Found:
 - fact
@@ -164,7 +164,7 @@ FINAL_ANSWER_PROMPT = """Answer using only the facts above. If insufficient, say
 Output:
 Exact Answer:"""
 
-RETHINK_PROMPT = """You are stuck. All previous searches found nothing. Think of a completely different angle — new keywords, different entities.
+RETHINK_PROMPT = """Previous searches found nothing for the question above. Look at what was tried and find a NEW angle — different entities, different time periods, different keywords. Do NOT repeat any previous query.
 
 Output:
 Search Query: <3-5 keywords>"""
@@ -254,8 +254,8 @@ def _parse_dead_ends(text: str) -> List[str]:
 
 
 def _parse_status(text: str) -> str:
-    m = re.search(r'^Status:\s*(YES|NO)\s*$',
-                  text, re.I | re.M)
+    m = re.search(r'Status:\s*\*{0,2}\s*(YES|NO)\s*\*{0,2}',
+                  text, re.I)
     return m.group(1).upper() if m else "NO"
 
 
