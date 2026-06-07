@@ -61,7 +61,9 @@ pip install -r core/agent/requirements.txt
 ### 3.3 构建 BM25 索引
 
 ```bash
-python core/agent/build_bm25_index.py \
+# 先将语料库放到 browsecomp-plus-corpus/data/ 下（或软链到实际路径）
+mkdir -p indexes
+python -m core.agent.build_bm25_index \
   --corpus-path browsecomp-plus-corpus/data/ \
   --index-path indexes/browsecomp_plus_bm25.sqlite
 ```
