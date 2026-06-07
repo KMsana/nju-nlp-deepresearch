@@ -16,9 +16,9 @@ from agent.multiagent import run_agent_loop
 VLLM_BASE_URL = "http://127.0.0.1:8000/v1"
 MODEL_NAME = "qwen_auto"
 API_KEY = "dummy"
-INDEX_PATH = "indexes/browsecomp_plus_bm25.sqlite"
-DATASET_PATH = "browsecomp_plus_hard50.jsonl"
-OUTPUT_PATH = "runs/submission.jsonl"
+INDEX_PATH = str(_ROOT / "indexes" / "browsecomp_plus_bm25.sqlite")
+DATASET_PATH = str(_ROOT / "browsecomp_plus_hard50.jsonl")
+OUTPUT_PATH = str(_ROOT / "runs" / "submission.jsonl")
 MAX_TURNS = 5
 WORKERS = 3
 
